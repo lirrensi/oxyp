@@ -1,5 +1,6 @@
-# Binaries
-oxyp
+# Binaries (built artifact only — NOT the cmd/oxyp source dir)
+/oxyp
+oxyp.exe
 *.exe
 *.out
 
