@@ -1,10 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- remote endpoint parsing ---
@@ -186,12 +190,12 @@ func TestLocalOnlyCommandsRefuseRemote(t *testing.T) {
 	t.Setenv("OXYP_URL", "http://h:1")
 	t.Setenv("OXYP_TOKEN", "t")
 	for name, cmd := range map[string]interface{ Execute() error }{
-		"daemon": daemonCmd(),
-		"login":  loginCmd(),
-		"doctor": doctorCmd(),
-		"add":    addCmd(),
-		"import": importCmd(),
-		"stop":   stopCmd(),
+		"daemon":  daemonCmd(),
+		"login":   loginCmd(),
+		"doctor":  doctorCmd(),
+		"add":     addCmd(),
+		"import":  importCmd(),
+		"stop":    stopCmd(),
 		"restart": restartCmd(),
 	} {
 		if name == "login" {
@@ -204,5 +208,207 @@ func TestLocalOnlyCommandsRefuseRemote(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "local-only") && !strings.Contains(err.Error(), "OXYP_URL") {
 			t.Fatalf("%s: err = %v, want local-only refusal", name, err)
 		}
+	}
+}
+
+// --- cross-namespace adoption (Win host vs WSL, container, ssh-forward) ---
+
+// adoptFixture serves /health as an oxyp daemon whose PID is dead HERE
+// (the cross-namespace case): probeOxyp must reject it, fetchOxypHealth
+// must accept it.
+func adoptFixture(t *testing.T, token string) *httptest.Server {
+	t.Helper()
+	deadPID := os.Getpid() + 7654321
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			w.WriteHeader(404)
+			return
+		}
+		if token != "" && r.Header.Get("Authorization") != "Bearer "+token {
+			w.WriteHeader(401)
+			return
+		}
+		fmt.Fprintf(w, `{"pid":%d,"startedAt":"2026-10-30T00:00:00Z","servers":{}}`, deadPID)
+	}))
+}
+
+func TestFetchVsProbeAdoptionSplit(t *testing.T) {
+	srv := adoptFixture(t, "sekret")
+	defer srv.Close()
+	withDirFlag(t, t.TempDir())
+	// fetch: shape + token only — accepts the foreign-PID responder.
+	h, ok := fetchOxypHealth(srv.URL, "sekret")
+	if !ok || h.PID <= 0 || h.StartedAt == "" {
+		t.Fatalf("fetch = %+v %v, want accept", h, ok)
+	}
+	if _, ok := fetchOxypHealth(srv.URL, "wrong"); ok {
+		t.Fatal("fetch with wrong token must reject")
+	}
+	// probe: liveness-gated — rejects the same responder.
+	if _, _, ok := probeOxyp(srv.URL, "sekret"); ok {
+		t.Fatal("probe must reject foreign-PID responder")
+	}
+}
+
+func TestTryAdoptStaleEndpoint(t *testing.T) {
+	srv := adoptFixture(t, "sekret")
+	defer srv.Close()
+	dir := t.TempDir()
+	withDirFlag(t, dir)
+	// Shared-dir case: daemon.json names a PID that is dead HERE.
+	deadPID := os.Getpid() + 7654321
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw := fmt.Sprintf(`{"url":%q,"pid":%d,"token":"sekret","startedAt":"x"}`, srv.URL, deadPID)
+	if err := os.WriteFile(endpointPath(), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if e := readLocalEndpoint(); e != nil {
+		t.Fatalf("local reader must reject dead PID, got %+v", e)
+	}
+	a := tryAdopt()
+	if a == nil || !a.Adopted || a.URL != srv.URL || a.Token != "sekret" {
+		t.Fatalf("adopt = %+v, want adopted endpoint", a)
+	}
+	// Adopted endpoint is in-memory only: the file still names the dead PID.
+	b, _ := os.ReadFile(endpointPath())
+	if !strings.Contains(string(b), `"pid":`) || strings.Contains(string(b), `"Adopted"`) {
+		t.Fatalf("endpoint file must be untouched: %s", b)
+	}
+}
+
+func TestTryAdoptConfiguredAddr(t *testing.T) {
+	srv := adoptFixture(t, "")
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No-shared-dir + forwarded-port case: no daemon.json at all, the
+	// addr comes from oxyp.toml.
+	dir := t.TempDir()
+	withDirFlag(t, dir)
+	writeMinimalTOML(t, dir, "[daemon]\naddr = "+fmt.Sprintf("%q", u.Host)+"\n")
+	a := tryAdopt()
+	if a == nil || !a.Adopted || a.URL != srv.URL {
+		t.Fatalf("adopt = %+v, want %s", a, srv.URL)
+	}
+}
+
+func TestTryAdoptRejects(t *testing.T) {
+	withDirFlag(t, t.TempDir())
+	// Nothing on file, no config → nil (no probe storm).
+	if a := tryAdopt(); a != nil {
+		t.Fatalf("empty dir: adopt = %+v", a)
+	}
+	// Stranger JSON on the stale URL → nil.
+	stranger := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"hello":"world"}`))
+	}))
+	defer stranger.Close()
+	dir := t.TempDir()
+	withDirFlag(t, dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw := fmt.Sprintf(`{"url":%q,"pid":1,"token":"","startedAt":"x"}`, stranger.URL)
+	if err := os.WriteFile(endpointPath(), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if a := tryAdopt(); a != nil {
+		t.Fatalf("stranger: adopt = %+v", a)
+	}
+	// Right shape, wrong token → nil.
+	gated := adoptFixture(t, "sekret")
+	defer gated.Close()
+	raw = fmt.Sprintf(`{"url":%q,"pid":1,"token":"wrong","startedAt":"x"}`, gated.URL)
+	if err := os.WriteFile(endpointPath(), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if a := tryAdopt(); a != nil {
+		t.Fatalf("wrong token: adopt = %+v", a)
+	}
+}
+
+func TestEnsureDaemonAdoptsWithoutSpawn(t *testing.T) {
+	srv := adoptFixture(t, "")
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No daemon.json, config addr = the fixture. ensureDaemon must
+	// attach in ~ms — a spawn attempt would take the 5 s autostart wait
+	// and then fail (no oxyp.toml servers are needed for the wait path,
+	// but the spawned daemon would still come up: guard on time + flag).
+	dir := t.TempDir()
+	withDirFlag(t, dir)
+	writeMinimalTOML(t, dir, "[daemon]\naddr = "+fmt.Sprintf("%q", u.Host)+"\n")
+	start := time.Now()
+	e, err := ensureDaemon()
+	if err != nil {
+		t.Fatalf("ensureDaemon: %v", err)
+	}
+	if !e.Adopted || e.URL != srv.URL {
+		t.Fatalf("endpoint = %+v, want adopted", e)
+	}
+	if d := time.Since(start); d > 4*time.Second {
+		t.Fatalf("adopt took %v — looks like an autostart wait, not adoption", d)
+	}
+	// apiCall rides the adopted endpoint.
+	var gotPath string
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.URL.Path == "/health" {
+			fmt.Fprintf(w, `{"pid":%d,"startedAt":"x","servers":{}}`, os.Getpid()+7654321)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv2.Close()
+	u2, _ := url.Parse(srv2.URL)
+	writeMinimalTOML(t, dir, "[daemon]\naddr = "+fmt.Sprintf("%q", u2.Host)+"\n")
+	if _, code, err := apiCall("GET", "/servers", nil); err != nil || code != 200 {
+		t.Fatalf("apiCall via adopted = %d %v", code, err)
+	}
+	if gotPath != "/servers" {
+		t.Fatalf("path = %q", gotPath)
+	}
+}
+
+func TestStopDaemonRefusesAdopted(t *testing.T) {
+	srv := adoptFixture(t, "")
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	withDirFlag(t, dir)
+	writeMinimalTOML(t, dir, "[daemon]\naddr = "+fmt.Sprintf("%q", u.Host)+"\n")
+	_, err = stopDaemon()
+	if err == nil || !strings.Contains(err.Error(), "already running elsewhere") {
+		t.Fatalf("err = %v, want elsewhere-refusal", err)
+	}
+}
+
+func TestStopDaemonStaleStillClean(t *testing.T) {
+	// Dead PID on file + NOTHING answering → clean false (crash recovery
+	// path unchanged: adoption only fires on a live oxyp-shaped 200).
+	dir := t.TempDir()
+	withDirFlag(t, dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deadPID := os.Getpid() + 7654321
+	raw := fmt.Sprintf(`{"url":"http://127.0.0.1:9","pid":%d,"token":"","startedAt":"x"}`, deadPID)
+	if err := os.WriteFile(endpointPath(), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeMinimalTOML(t, dir, "[daemon]\naddr = \"127.0.0.1:9\"\n")
+	stopped, err := stopDaemon()
+	if err != nil || stopped {
+		t.Fatalf("stale: stopped=%v err=%v", stopped, err)
 	}
 }

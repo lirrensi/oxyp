@@ -65,6 +65,7 @@ type endpoint struct {
 	Token     string `json:"token"`
 	StartedAt string `json:"startedAt"`
 	Remote    bool   `json:"-"`
+	Adopted   bool   `json:"-"`
 }
 
 func endpointPath() string { return filepath.Join(oxypDir(), "daemon.json") }
@@ -214,10 +215,16 @@ func daemonCmd() *cobra.Command {
 			ln, err := net.Listen("tcp", cfg.Daemon.Addr)
 			if err != nil {
 				// Bind failed — but WHO holds the port? Ours (stale
-				// endpoint, racing autostart) is a clean no-op; a
+				// endpoint, racing autostart) is a clean no-op; a live
+				// oxyp from another namespace (Win host, container,
+				// forward) is an honest report, not a start; a
 				// stranger is the only real failure.
 				if pid, started, ok := probeOxyp(localDialURL(cfg.Daemon.Addr), cfg.Daemon.Token); ok {
 					fmt.Fprintf(os.Stderr, "oxyp daemon already running (pid %d, started %s)\n", pid, started)
+					return nil
+				}
+				if h, ok := fetchOxypHealth(localDialURL(cfg.Daemon.Addr), cfg.Daemon.Token); ok {
+					fmt.Fprintf(os.Stderr, "oxyp daemon already serves this port from elsewhere (pid %d, started %s) — not starting a second copy\n", h.PID, h.StartedAt)
 					return nil
 				}
 				return fmt.Errorf("listen %s: %w (not our daemon — something else holds the port)", cfg.Daemon.Addr, err)
@@ -286,7 +293,12 @@ func ensureDaemon() (*endpoint, error) {
 			return e, nil
 		}
 	}
-	// autostart: spawn detached daemon
+	// Adopt: a live oxyp may answer on our port from another namespace
+	// (Win host vs WSL, container, ssh-forward) where its PID is dead
+	// to us. Attach instead of spawning a doomed second copy.
+	if e := tryAdopt(); e != nil {
+		return e, nil
+	}
 	bin, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -324,13 +336,21 @@ func alive(e *endpoint) bool {
 	return resp.StatusCode == 200
 }
 
-// probeOxyp asks "are you OUR daemon?" — a 200 with an oxyp-shaped body
-// (pid + servers keys) under our bearer token. A stranger answering 200
-// with anything else is NOT us. Returns the occupant's pid + startedAt.
-func probeOxyp(baseURL, token string) (pid int, startedAt string, ok bool) {
+// oxypHealth is the parsed /health identity of an oxyp-shaped responder.
+type oxypHealth struct {
+	PID       int
+	StartedAt string
+}
+
+// fetchOxypHealth asks "are you oxyp?" — a 200 with an oxyp-shaped body
+// (pid + servers keys) under the bearer token. A stranger answering 200
+// with anything else is NOT oxyp. No PID liveness check: the caller
+// decides whether the responder is local (ours to signal) or adopted
+// (another namespace: Win host, container, ssh-forward — dial, never signal).
+func fetchOxypHealth(baseURL, token string) (oxypHealth, bool) {
 	req, err := http.NewRequest("GET", baseURL+"/health", nil)
 	if err != nil {
-		return 0, "", false
+		return oxypHealth{}, false
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -338,11 +358,11 @@ func probeOxyp(baseURL, token string) (pid int, startedAt string, ok bool) {
 	c := &http.Client{Timeout: 2 * time.Second}
 	resp, err := c.Do(req)
 	if err != nil {
-		return 0, "", false
+		return oxypHealth{}, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return 0, "", false
+		return oxypHealth{}, false
 	}
 	var v struct {
 		PID       int            `json:"pid"`
@@ -351,23 +371,79 @@ func probeOxyp(baseURL, token string) (pid int, startedAt string, ok bool) {
 	}
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, "", false
+		return oxypHealth{}, false
 	}
-	if json.Unmarshal(b, &v) != nil || v.Servers == nil {
+	if json.Unmarshal(b, &v) != nil || v.Servers == nil || v.PID <= 0 {
+		return oxypHealth{}, false
+	}
+	return oxypHealth{PID: v.PID, StartedAt: v.StartedAt}, true
+}
+
+// probeOxyp asks "are you OUR daemon?" — oxyp-shaped AND the PID is a
+// live local process AND any endpoint on file agrees. Cross-namespace
+// responders (live oxyp, dead-or-foreign PID here) fail: use tryAdopt.
+func probeOxyp(baseURL, token string) (pid int, startedAt string, ok bool) {
+	h, ok := fetchOxypHealth(baseURL, token)
+	if !ok {
 		return 0, "", false
 	}
 	// PID cross-check: the responder must be a live process, and if we
 	// have an endpoint on file it must name the same PID.
-	if v.PID <= 0 {
+	if p, err := os.FindProcess(h.PID); err != nil || p.Signal(syscall.Signal(0)) != nil {
 		return 0, "", false
 	}
-	if p, err := os.FindProcess(v.PID); err != nil || p.Signal(syscall.Signal(0)) != nil {
+	if e := readLocalEndpoint(); e != nil && e.PID != h.PID {
 		return 0, "", false
 	}
-	if e := readLocalEndpoint(); e != nil && e.PID != v.PID {
-		return 0, "", false
+	return h.PID, h.StartedAt, true
+}
+
+// readStaleEndpoint reads daemon.json WITHOUT the PID liveness check.
+// Used for adoption: the PID may belong to another namespace (Win host
+// vs WSL, container, ssh-forward) while the HTTP port is shared.
+func readStaleEndpoint() *endpoint {
+	b, err := os.ReadFile(endpointPath())
+	if err != nil {
+		return nil
 	}
-	return v.PID, v.StartedAt, true
+	var e endpoint
+	if json.Unmarshal(b, &e) != nil || e.URL == "" {
+		return nil
+	}
+	return &e
+}
+
+// tryAdopt attaches to an oxyp daemon reachable over HTTP whose PID is
+// NOT visible here (cross-namespace: Win/WSL, container, port forward).
+// It probes the stale endpoint URL first, then the configured addr from
+// oxyp.toml (covers no-shared-dir + forwarded-port setups). The adopted
+// endpoint is in-memory only — never written back (the PID on file is
+// someone else's), flagged Adopted so stop/restart refuse to signal it.
+func tryAdopt() *endpoint {
+	type cand struct{ url, token string }
+	var cands []cand
+	if e := readStaleEndpoint(); e != nil {
+		cands = append(cands, cand{e.URL, e.Token})
+	}
+	if cfg, err := config.Load(oxypDir()); err == nil && cfg.Daemon.Addr != "" {
+		u := localDialURL(cfg.Daemon.Addr)
+		dup := false
+		for _, c := range cands {
+			if c.url == u {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			cands = append(cands, cand{u, cfg.Daemon.Token})
+		}
+	}
+	for _, c := range cands {
+		if h, ok := fetchOxypHealth(c.url, c.token); ok {
+			return &endpoint{URL: c.url, PID: h.PID, Token: c.token, StartedAt: h.StartedAt, Adopted: true}
+		}
+	}
+	return nil
 }
 
 func apiCall(method, path string, body any) ([]byte, int, error) {
@@ -616,14 +692,19 @@ func restartCmd() *cobra.Command {
 // stopDaemon SIGTERMs the endpoint PID and waits for the process to exit
 // (~5s grace, then SIGKILL). A missing/dead endpoint is a clean false —
 // stopping something that isn't running is not an error. Remote mode
-// (OXYP_URL) is refused: there is no local process to signal. Returns
-// true when it actually stopped a live daemon.
+// (OXYP_URL) is refused: there is no local process to signal. An adopted
+// daemon (live oxyp, foreign PID) is refused too: its PID belongs to
+// another namespace and must never be signaled from here. Returns true
+// when it actually stopped a live daemon.
 func stopDaemon() (bool, error) {
 	if err := requireLocal("stop"); err != nil {
 		return false, err
 	}
 	e := readLocalEndpoint()
 	if e == nil {
+		if a := tryAdopt(); a != nil {
+			return false, fmt.Errorf("daemon is already running elsewhere (pid %d, started %s) — stop it where it lives", a.PID, a.StartedAt)
+		}
 		return false, nil
 	}
 	p, err := os.FindProcess(e.PID)

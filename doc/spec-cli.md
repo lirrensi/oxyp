@@ -95,6 +95,20 @@ plain HTTP — home nets / SSH-forward only, never the open internet)
 writes a dialable `127.0.0.1` URL into its local endpoint file, so the
 on-box CLI/shim attach works while LAN peers dial the LAN IP + token.
 
+Cross-namespace adoption: when the local PID is dead/missing but a live
+oxyp answers `/health` under our token — Win host vs WSL, container,
+port forward — the CLI/shim MUST attach to it instead of spawning a
+doomed second copy. Adoption probes the stale `daemon.json` URL first,
+then the `oxyp.toml` addr (no-shared-dir + forwarded-port setups);
+wrong token / stranger JSON / refused port all decline silently and
+autostart proceeds. Adopted endpoints are in-memory only (never
+written back — the PID on file belongs to another namespace) and
+flagged so `stop`/`restart` refuse (`already running elsewhere — stop
+it where it lives`) rather than signaling a foreign PID. A manual
+`daemon` that finds the port held by adopted oxyp reports `already
+serves this port from elsewhere` and exits 0. `OXYP_URL` still wins
+over adoption when set.
+
 #### Scenario: First command boots the daemon
 
 - **GIVEN** no daemon running

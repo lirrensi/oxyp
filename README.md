@@ -177,6 +177,13 @@ and refuse with `OXYP_URL` set — run them where the daemon lives. Token
 goes over plain HTTP, so this is for trusted LANs or `ssh -L` tunnels,
 never the open internet.
 
+No `OXYP_URL` needed when the port is already shared: daemon on Win +
+client in WSL (mirrored networking), a container, or an `ssh -L`
+forward — if the PID on file is dead here but a live oxyp answers the
+same URL/addr under your token, the CLI/shim just attaches instead of
+spawning a second copy. `stop` refuses adopted daemons (`already
+running elsewhere`) — stop it where it lives.
+
 ## CLI cheat sheet
 
 | Command | What it does |
