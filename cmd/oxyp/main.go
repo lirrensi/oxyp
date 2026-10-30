@@ -43,7 +43,7 @@ var (
 func main() {
 	root := &cobra.Command{Use: "oxyp", Short: "one daemon, every connector"}
 	root.PersistentFlags().StringVar(&dirFlag, "dir", "", "config dir (default OXYP_DIR, XDG_CONFIG_HOME/oxyp, or ~/.oxyp)")
-	root.AddCommand(daemonCmd(), callCmd(), serversCmd(), toolsCmd(), searchCmd(), describeCmd(), statusCmd(), reloadCmd(), shimCmd(), loginCmd(), doctorCmd(), addCmd(), importCmd())
+	root.AddCommand(daemonCmd(), callCmd(), serversCmd(), toolsCmd(), searchCmd(), describeCmd(), statusCmd(), reloadCmd(), stopCmd(), restartCmd(), shimCmd(), loginCmd(), doctorCmd(), addCmd(), importCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -120,6 +120,15 @@ func daemonCmd() *cobra.Command {
 					defer tr.Close()
 				}
 			}
+			// Pre-flight: our own daemon already owns this dir+addr? Exit clean
+			// instead of dying on bind — a second `daemon` (or a racing
+			// autostart) is a no-op, not a failure.
+			if e := readEndpoint(); e != nil && e.URL == "http://"+cfg.Daemon.Addr {
+				if pid, started, ok := probeOxyp(e.URL, cfg.Daemon.Token); ok {
+					fmt.Fprintf(os.Stderr, "oxyp daemon already running (pid %d, started %s)\n", pid, started)
+					return nil
+				}
+			}
 			startToken, startAddr := cfg.Daemon.Token, cfg.Daemon.Addr
 			reload := func() (a, r, m []string, err error) {
 				ncfg, err := config.Load(dir)
@@ -132,9 +141,12 @@ func daemonCmd() *cobra.Command {
 				a, r, m = d.Reload(ncfg)
 				return a, r, m, nil
 			}
+			ms := meta.New(d, reload, cfg.Daemon.Token, cfg.Daemon.Addr)
+			startedAt := time.Now().Format(time.RFC3339)
+			ms.SetIdentity(os.Getpid(), startedAt)
 			srv := &http.Server{
 				Addr:              cfg.Daemon.Addr,
-				Handler:           meta.New(d, reload, cfg.Daemon.Token, cfg.Daemon.Addr).Handler(),
+				Handler:           ms.Handler(),
 				ReadHeaderTimeout: 10 * time.Second,
 				ReadTimeout:       30 * time.Second,
 				WriteTimeout:      60 * time.Second,
@@ -144,11 +156,18 @@ func daemonCmd() *cobra.Command {
 			defer stop()
 			ln, err := net.Listen("tcp", cfg.Daemon.Addr)
 			if err != nil {
-				return err
+				// Bind failed — but WHO holds the port? Ours (stale
+				// endpoint, racing autostart) is a clean no-op; a
+				// stranger is the only real failure.
+				if pid, started, ok := probeOxyp("http://"+cfg.Daemon.Addr, cfg.Daemon.Token); ok {
+					fmt.Fprintf(os.Stderr, "oxyp daemon already running (pid %d, started %s)\n", pid, started)
+					return nil
+				}
+				return fmt.Errorf("listen %s: %w (not our daemon — something else holds the port)", cfg.Daemon.Addr, err)
 			}
 			if err := writeEndpoint(endpoint{
 				URL: "http://" + cfg.Daemon.Addr, PID: os.Getpid(),
-				Token: cfg.Daemon.Token, StartedAt: time.Now().Format(time.RFC3339),
+				Token: cfg.Daemon.Token, StartedAt: startedAt,
 			}); err != nil {
 				return err
 			}
@@ -238,6 +257,52 @@ func alive(e *endpoint) bool {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == 200
+}
+
+// probeOxyp asks "are you OUR daemon?" — a 200 with an oxyp-shaped body
+// (pid + servers keys) under our bearer token. A stranger answering 200
+// with anything else is NOT us. Returns the occupant's pid + startedAt.
+func probeOxyp(baseURL, token string) (pid int, startedAt string, ok bool) {
+	req, err := http.NewRequest("GET", baseURL+"/health", nil)
+	if err != nil {
+		return 0, "", false
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	c := &http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Do(req)
+	if err != nil {
+		return 0, "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return 0, "", false
+	}
+	var v struct {
+		PID       int            `json:"pid"`
+		StartedAt string         `json:"startedAt"`
+		Servers   map[string]any `json:"servers"`
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, "", false
+	}
+	if json.Unmarshal(b, &v) != nil || v.Servers == nil {
+		return 0, "", false
+	}
+	// PID cross-check: the responder must be a live process, and if we
+	// have an endpoint on file it must name the same PID.
+	if v.PID <= 0 {
+		return 0, "", false
+	}
+	if p, err := os.FindProcess(v.PID); err != nil || p.Signal(syscall.Signal(0)) != nil {
+		return 0, "", false
+	}
+	if e := readEndpoint(); e != nil && e.PID != v.PID {
+		return 0, "", false
+	}
+	return v.PID, v.StartedAt, true
 }
 
 func apiCall(method, path string, body any) ([]byte, int, error) {
@@ -444,6 +509,76 @@ func reloadCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func stopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "stop the daemon (SIGTERM, waits for exit)",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			stopped, err := stopDaemon()
+			if err != nil {
+				return err
+			}
+			if stopped {
+				fmt.Println("daemon stopped")
+			} else {
+				fmt.Println("daemon not running")
+			}
+			return nil
+		},
+	}
+}
+
+func restartCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "restart",
+		Short: "stop the daemon and start it again (picks up addr/token changes)",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if _, err := stopDaemon(); err != nil {
+				return err
+			}
+			e, err := ensureDaemon()
+			if err != nil {
+				return err
+			}
+			fmt.Printf("daemon restarted (pid %d)\n", e.PID)
+			return nil
+		},
+	}
+}
+
+// stopDaemon SIGTERMs the endpoint PID and waits for the process to exit
+// (~5s grace, then SIGKILL). A missing/dead endpoint is a clean false —
+// stopping something that isn't running is not an error. Returns true
+// when it actually stopped a live daemon.
+func stopDaemon() (bool, error) {
+	e := readEndpoint()
+	if e == nil {
+		return false, nil
+	}
+	p, err := os.FindProcess(e.PID)
+	if err != nil {
+		_ = os.Remove(endpointPath())
+		return false, nil
+	}
+	if err := p.Signal(syscall.SIGTERM); err != nil {
+		_ = os.Remove(endpointPath())
+		return false, nil
+	}
+	for range 50 {
+		time.Sleep(100 * time.Millisecond)
+		if p.Signal(syscall.Signal(0)) != nil {
+			_ = os.Remove(endpointPath())
+			return true, nil
+		}
+	}
+	// Grace expired — escalate. Daemon children die with the daemon
+	// (d.Close on shutdown path; SIGKILL orphans stdio children to init,
+	// which exit on EOF when their stdin pipe closes).
+	_ = p.Signal(syscall.SIGKILL)
+	_ = os.Remove(endpointPath())
+	return true, nil
 }
 
 func shimCmd() *cobra.Command {

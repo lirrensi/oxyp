@@ -88,6 +88,8 @@ args: [shim]
 | `oxyp import [--from …] [--write]` | convert cursor/claude/vscode/opencode/omp configs |
 | `oxyp login <server>` | OAuth login (browser/device/token per config) |
 | `oxyp reload` | re-read config (or `kill -HUP`) |
+| `oxyp stop` | stop the daemon (idempotent) |
+| `oxyp restart` | stop + start (picks up addr/token changes) |
 
 ## Configure
 

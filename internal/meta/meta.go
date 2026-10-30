@@ -38,11 +38,13 @@ import (
 
 // Server wires HTTP handlers to a daemon + reload func.
 type Server struct {
-	d        *daemon.Daemon
-	reload   func() (added, removed, modified []string, err error)
-	token    string
-	bindAddr string
-	mux      *http.ServeMux
+	d         *daemon.Daemon
+	reload    func() (added, removed, modified []string, err error)
+	token     string
+	bindAddr  string
+	pid       int
+	startedAt string
+	mux       *http.ServeMux
 }
 
 // New builds the handler set. token "" = no auth (loopback trust).
@@ -60,6 +62,12 @@ func New(d *daemon.Daemon, reload func() (added, removed, modified []string, err
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("POST /reload", s.handleReload)
 	return s
+}
+
+// SetIdentity stamps the daemon's PID + start time onto /health so CLI
+// probes can tell "our daemon" from a stranger on the same port.
+func (s *Server) SetIdentity(pid int, startedAt string) {
+	s.pid, s.startedAt = pid, startedAt
 }
 
 func (s *Server) Handler() http.Handler {
@@ -489,7 +497,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		servers[name] = entry
 	}
-	writeJSON(w, map[string]any{"servers": servers})
+	writeJSON(w, map[string]any{"pid": s.pid, "startedAt": s.startedAt, "servers": servers})
 }
 
 func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {

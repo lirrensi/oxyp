@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/lirrensi/oxyp/internal/config"
@@ -179,6 +180,129 @@ func TestAliveTrueFalseAndBearer(t *testing.T) {
 	}
 	if alive(&endpoint{URL: "http://%zz"}) {
 		t.Fatal("alive must be false on bad URL")
+	}
+}
+
+func TestProbeOxypClassification(t *testing.T) {
+	mine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			w.WriteHeader(401)
+			return
+		}
+		fmt.Fprintf(w, `{"pid":%d,"startedAt":"2026-10-30T00:00:00Z","servers":{}}`, os.Getpid())
+	}))
+	defer mine.Close()
+	// No endpoint on file: responder PID is live, no mismatch → ours.
+	withDirFlag(t, t.TempDir())
+	pid, started, ok := probeOxyp(mine.URL, "tok")
+	if !ok || pid != os.Getpid() || started == "" {
+		t.Fatalf("ours: got pid=%d started=%q ok=%v", pid, started, ok)
+	}
+	// Wrong token → 401 → not us.
+	if _, _, ok := probeOxyp(mine.URL, "wrong"); ok {
+		t.Fatal("wrong token must not classify as ours")
+	}
+	// Stranger answering 200 with non-oxyp JSON → not us.
+	stranger := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"hello":"world"}`))
+	}))
+	defer stranger.Close()
+	if _, _, ok := probeOxyp(stranger.URL, ""); ok {
+		t.Fatal("stranger JSON must not classify as ours")
+	}
+	// Stranger answering 404 (plain HTTP server, no /health) → not us.
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+	}))
+	defer plain.Close()
+	if _, _, ok := probeOxyp(plain.URL, ""); ok {
+		t.Fatal("404 must not classify as ours")
+	}
+	// Oxyp-shaped body naming a DEAD pid → not us. Find one by bumping
+	// past our own PID until kill -0 fails (PIDs are dense; a few tries
+	// always land on a corpse — and never on a recycled live one that
+	// equals ours, which is the only false-accept risk).
+	deadPID := os.Getpid() + 1
+	for range 10000 {
+		p, _ := os.FindProcess(deadPID)
+		if p.Signal(syscall.Signal(0)) != nil {
+			break
+		}
+		deadPID++
+	}
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"pid":%d,"startedAt":"x","servers":{}}`, deadPID)
+	}))
+	defer dead.Close()
+	if _, _, ok := probeOxyp(dead.URL, ""); ok {
+		t.Fatal("dead PID must not classify as ours")
+	}
+	// Endpoint on file naming a different LIVE pid → not us (another
+	// dir's daemon squatting our port). Hold a sleeper to own one.
+	sleep := exec.Command("sleep", "30")
+	if err := sleep.Start(); err != nil {
+		t.Skip("no sleep binary")
+	}
+	defer func() { _ = sleep.Process.Kill() }()
+	if err := writeEndpoint(endpoint{URL: mine.URL, PID: sleep.Process.Pid, Token: "tok"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := probeOxyp(mine.URL, "tok"); ok {
+		t.Fatal("endpoint PID mismatch must not classify as ours")
+	}
+	// Same setup but endpoint agrees with the responder → ours.
+	if err := writeEndpoint(endpoint{URL: mine.URL, PID: os.Getpid(), Token: "tok"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := probeOxyp(mine.URL, "tok"); !ok {
+		t.Fatal("matching endpoint PID must classify as ours")
+	}
+	// Connection refused → not us.
+	if _, _, ok := probeOxyp("http://127.0.0.1:1", ""); ok {
+		t.Fatal("refused must not classify as ours")
+	}
+}
+
+func TestStopDaemonLifecycle(t *testing.T) {
+	withDirFlag(t, t.TempDir())
+	// Nothing running → clean false, no error.
+	stopped, err := stopDaemon()
+	if err != nil || stopped {
+		t.Fatalf("empty: stopped=%v err=%v", stopped, err)
+	}
+	// Live process named by the endpoint → SIGTERM, waited, file gone.
+	sleep := exec.Command("sleep", "30")
+	if err := sleep.Start(); err != nil {
+		t.Skip("no sleep binary")
+	}
+	if err := writeEndpoint(endpoint{URL: "http://127.0.0.1:9", PID: sleep.Process.Pid}); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err = stopDaemon()
+	if err != nil || !stopped {
+		t.Fatalf("live: stopped=%v err=%v", stopped, err)
+	}
+	if _, err := os.Stat(endpointPath()); !os.IsNotExist(err) {
+		t.Fatal("endpoint file must be removed after stop")
+	}
+	if err := sleep.Wait(); err == nil {
+		t.Fatal("sleeper should have died by signal, not exited 0")
+	}
+	// Stale endpoint (dead PID) → clean false, no error.
+	withDirFlag(t, t.TempDir())
+	if err := os.MkdirAll(oxypDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deadPID := os.Getpid() + 7654321
+	if err := os.WriteFile(endpointPath(), []byte(fmt.Sprintf(`{"url":"http://127.0.0.1:9","pid":%d}`, deadPID)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err = stopDaemon()
+	if err != nil || stopped {
+		t.Fatalf("stale: stopped=%v err=%v", stopped, err)
 	}
 }
 

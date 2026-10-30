@@ -200,6 +200,31 @@ func TestServersConfigErrorAndHealth(t *testing.T) {
 	}
 }
 
+func TestHealthCarriesIdentity(t *testing.T) {
+	d := daemon.New(&config.Config{}, nil)
+	defer d.Close()
+	s := New(d, nil, "", "127.0.0.1:8379")
+	s.SetIdentity(4242, "2026-10-30T00:00:00Z")
+	rr := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/health", nil)
+	r.Host = "127.0.0.1"
+	s.Handler().ServeHTTP(rr, r)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("health: got %d", rr.Code)
+	}
+	var v struct {
+		PID       int            `json:"pid"`
+		StartedAt string         `json:"startedAt"`
+		Servers   map[string]any `json:"servers"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &v); err != nil {
+		t.Fatalf("health body: %v", err)
+	}
+	if v.PID != 4242 || v.StartedAt == "" || v.Servers == nil {
+		t.Fatalf("identity missing: %+v", v)
+	}
+}
+
 func TestListToolsAndDescribeC1(t *testing.T) {
 	policy := &config.ToolsPolicy{Deny: []string{"delete_*", "secret"}}
 	f := newFixture(t, "svc", "svc", policy, func(s *mcpserver.MCPServer, reqs *atomic.Int64) {

@@ -44,9 +44,9 @@ sibling specs).
 
 ### Requirement: Command table and autostart
 
-The binary MUST offer 13 subcommands under global `[--dir <dir>]` (which
+The binary MUST offer 15 subcommands under global `[--dir <dir>]` (which
 beats all dir resolution): `daemon`, `call`, `servers`, `tools`, `search`,
-`describe`, `status`, `reload`, `shim`, `login`, `doctor`, `add`, `import`.
+`describe`, `status`, `reload`, `stop`, `restart`, `shim`, `login`, `doctor`, `add`, `import`.
 
 **As a** operator
 **I want** one binary for everything
@@ -62,6 +62,8 @@ beats all dir resolution): `daemon`, `call`, `servers`, `tools`, `search`,
 | `describe` | `<server> <tool>` | `GET /servers/{s}/tools/{t}` |
 | `status` | — | `GET /health` (ignores HTTP status) |
 | `reload` | — | `POST /reload`; ≥400 → exit 1 |
+| `stop` | — | SIGTERM endpoint PID, wait ~5 s (then SIGKILL), remove endpoint; not-running → `daemon not running`, exit 0 |
+| `restart` | — | `stop` (tolerates not-running) then autostart; prints new PID |
 | `shim` | — | stdio JSON-RPC ↔ daemon HTTP |
 | `login` | `<server>`; `--complete <url-or-code>` | flow dispatch, 5 min ctx; port rules per OAuth spec |
 | `doctor` | `--live/--json` | offline validation or 15 s-per-server live probe |

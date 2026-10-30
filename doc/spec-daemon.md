@@ -236,12 +236,21 @@ fresh files are created 0600 (an existing file keeps its mode — tighten it
 manually). Stale files are rejected by a dead-PID check. HTTP server
 limits are read-header 10 s / read 30 s / write 60 s / idle 120 s.
 
-#### Scenario: Double start attaches, crash recovers
+`GET /health` carries daemon identity as `{pid, startedAt, servers}` so
+CLI probes can tell "our daemon" from a stranger on the same port. Daemon
+startup pre-flights the endpoint: a live oxyp on our addr is a clean
+no-op (`already running (pid N)`, exit 0). A bind failure is classified
+the same way — ours is a no-op, anything else is the only real error
+(`not our daemon — something else holds the port`).
+
+#### Scenario: Double start attaches, crash recovers, stranger fails loud
 
 - **GIVEN** a running daemon
 - **WHEN** a second CLI command runs
 - **THEN** it autostarts nothing and talks to the live daemon; after a
-  crash, the stale endpoint is rejected and a new daemon starts.
+  crash, the stale endpoint is rejected and a new daemon starts; when a
+  non-oxyp process holds the port, startup fails with the stranger error
+  (not a bare bind failure).
 
 *Definition of Done: If this scenario passes, the requirement is met.*
 
