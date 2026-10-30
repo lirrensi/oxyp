@@ -1,234 +1,186 @@
 # oxyp
 
-One binary + one config = your agent, anywhere. Drop `oxyp` and `oxyp.toml`
-on any box, set env, run — no keychain, no machine-bound state, no install
-dance. See [stances](doc/PHILOSOPHY.md).
+[![Go](https://img.shields.io/github/go-mod/go-version/lirrensi/oxyp)](https://go.dev/)
+[![License](https://img.shields.io/github/license/lirrensi/oxyp)](LICENSE)
 
-One daemon, every connector. A lazy MCP gateway in Go: N downstream MCP
-servers behind 5 meta-tools, cold connections, deny-means-invisible
-permissions, one-file connectors auto-discovered from `~/.oxyp/connectors/`.
+**One daemon, every connector.** A lazy MCP gateway in Go: 20–30 MCP servers behind 5 tools — your agent's context never notices.
 
-Steals best practices from `mozilla-ai/mcpd` (spawn, stderr piping, health
-pings, TOML, SIGHUP reload) and `gitlab-org/ai/lazy-mcp` (4 meta-tools,
-lazy connect, endpoint file, glob permissions) — clean rewrite, no fork.
+## The problem
 
-## Stances
+Every MCP server wired into an agent dumps its full tool list — names, descriptions, JSON schemas — into context on *every turn*. Two servers feel fine. Ten servers (≈300 tools) bury the model in schema spam: slower answers, dumber answers, bigger bills. And every add/remove/rekey means touching each client's config by hand.
 
-Canon: [doc/PHILOSOPHY.md](doc/PHILOSOPHY.md).
+MCP servers *should* be easier to move around than a thousand tools. With oxyp, they are.
 
-- **Secrets: the harness procures, oxyp carries.** `${VAR}`/`{file:}`
-  expand at load, redacted in logs. oxyp never runs secret commands or
-  vault CLIs — procurement is execution, and execution is harness
-  territory.
-- **Portability is the feature.** Single binary, `${VARS}` config, nothing
-  machine-bound. If a feature needs a keychain or a GUI, the feature is
-  wrong.
-- **No approval prompts in the daemon.** No UI to ask through. Config
-  `deny`/hide is the whole permission story; ask-gates live on the
-  harness side of the pipe. Visible-but-gated is out of scope.
+## The fix: 5 tools, N servers
 
+Point your client at oxyp instead of at N servers. Your agent sees exactly this, forever:
+
+| Tool | Does |
+| ---- | ---- |
+| `list_servers` | what's connected, what's healthy |
+| `list_commands` | thin tool list for one server |
+| `search_tools` | ranked search across **all** servers by words |
+| `describe_commands` | full schema for one tool, on demand |
+| `invoke_command` | run it |
+
+Context stays flat whether you have 2 servers or 30: schemas load only for the tool about to be called. Connections stay cold until first use, idle children stop themselves, and tool metadata lives on disk — search works even with everything asleep.
+
+Servers become one TOML entry each. Add one, remove one, hide a tool — the agent's config never changes; it still sees the same 5 tools.
+
+The grown-up bits are included: daemon-held OAuth (browser / device / token / service flows, tokens in `0600` files the client never sees), deny-means-invisible permissions, an output guard with spill files, live doctoring, and one-file `connectors/` auto-discovery.
+
+## Install — one copy-paste
+
+Prerequisite: Go 1.21+ (the toolchain auto-upgrades to whatever oxyp needs).
+
+```bash
+go install github.com/lirrensi/oxyp/cmd/oxyp@latest
 ```
-<dir>/  (--dir > OXYP_DIR > XDG_CONFIG_HOME/oxyp > ~/.oxyp)
-  oxyp.toml          # daemon addr/token + server entries
-  connectors/        # executable one-file MCP servers, auto-discovered by name
-  daemon.json        # written at runtime: url, pid, token, startedAt (0600 on create)
+
+One static binary on your PATH. No runtime, no keychain, no machine-bound state. `oxyp` + `oxyp.toml` runs your agent anywhere.
+
+```bash
+oxyp servers                                        # autostarts the daemon; empty for now
+oxyp add https://api.githubcopilot.com/mcp/ --name github --write
+oxyp login github                                   # OAuth in the browser (or token flow)
+oxyp search "list pull requests"                    # ranked, across all servers — nothing spawns
+oxyp describe github list_pull_requests             # full schema, on demand
+oxyp call github get_me '{}'                        # run a tool straight from the CLI
 ```
 
-Canon docs: [overview](doc/overview.md), [daemon](doc/spec-daemon.md),
-[discovery](doc/spec-discovery.md), [OAuth](doc/spec-oauth.md),
-[HTTP + shim](doc/spec-http-shim.md), [guard/secrets/config](doc/spec-guard.md),
-[CLI](doc/spec-cli.md), [verification strategy](doc/verification/strategy.md).
+Already have MCPs in Cursor, Claude, VS Code, opencode, or omp? `oxyp import --write` converts them to oxyp TOML.
 
-## Config
+## Point your client at it
 
-Top-level scalars + `[daemon]` are daemon-wide; everything else lives under
-its own `[servers.<name>]`. The key IS the name — no `name =` field, no
-detached tables, no global tool policy.
+The shim speaks MCP over stdio — one entry per client (use the absolute path from `which oxyp` if your client spawns without a login shell):
+
+Claude Desktop / Cursor / VS Code / omp — `mcpServers.<name>`:
+
+```json
+{ "command": "oxyp", "args": ["shim"] }
+```
+
+opencode — `mcp.<name>` in `opencode.jsonc`:
+
+```json
+{ "type": "local", "command": ["oxyp", "shim"] }
+```
+
+hermes — `mcp_servers.<name>` in `config.yaml`:
+
+```yaml
+command: oxyp
+args: [shim]
+```
+
+## CLI cheat sheet
+
+| Command | What it does |
+| ------- | ------------ |
+| `oxyp servers` | list servers (autostarts the daemon) |
+| `oxyp tools <server>` | thin tool list (denied tools invisible) |
+| `oxyp search "query"` | ranked search, cached metadata, never spawns |
+| `oxyp describe <server> <tool>` | full schema for one tool |
+| `oxyp call <server> <tool> '<json>'` | invoke a tool |
+| `oxyp status` | daemon + per-server health |
+| `oxyp doctor [--live]` | validate config, or probe every server |
+| `oxyp add <url> [--name] [--write]` | probe a URL + append a server entry |
+| `oxyp import [--from …] [--write]` | convert cursor/claude/vscode/opencode/omp configs |
+| `oxyp login <server>` | OAuth login (browser/device/token per config) |
+| `oxyp reload` | re-read config (or `kill -HUP`) |
+
+## Configure
+
+`~/.oxyp/oxyp.toml` (override order: `--dir` > `OXYP_DIR` > `XDG_CONFIG_HOME/oxyp` > `~/.oxyp`):
 
 ```toml
 [daemon]
-addr = "127.0.0.1:8379"
-token = ""  # empty = loopback trust ONLY; non-loopback addr requires a token
+addr = "127.0.0.1:8379"   # empty token = loopback trust ONLY
 
-[servers.echo]
-description = "my connector"
-command = ["python3", "/path/to/echo.py"]
-# cwd = "/work/project"   # local-only: child workdir (default = daemon's cwd)
-# inherit_env = false     # local-only: clean minimal env (PATH/HOME only)
-                          # + explicit env overlays; default true
-# env = { FOO = "bar" }   # child env additions (both modes)
-
-[servers.echo.tools]
-allow = ["*"]
-deny = ["delete_*"]  # deny always wins; deny = invisible + blocked
-```
-
-Bad entries never kill the daemon: they show unhealthy in `status` with the
-config error, everything else keeps running. `enabled = false` hides a
-server entirely (C2). A server with no `[tools]` block allows all.
-`daemon.token` supports `${VAR}`/`{file:}` expansion (fail-closed on
-unset vars). `oxyp reload` keeps the startup addr/token: changing them
-requires a restart (the daemon logs a warning).
-
-Files dropped in `connectors/` (executable) become servers named by file
-stem. Explicit TOML entries with the same name win. New `oxyp.toml` files
-are created 0600; existing group/world-readable files are tightened to
-0600 on `add`/`import` (credentials ride in headers/env).
-
-## Lifecycle
-
-```toml
-[daemon]
-idle_timeout = 10  # minutes before an idle stdio child is stopped (0 = never)
-
-[servers.db]
-command = ["db-mcp"]
-lifecycle = "lazy"  # default: cold, stop when idle
-# lifecycle = "eager"          # connect at startup, no idle stop unless configured
-# lifecycle = "keep-alive"     # connect at startup, never idle-stop
-# lifecycle = "lazy-keep-alive" # cold start, never idle-stop after first use
-# idle_timeout = 0             # per-server override
-```
-
-Idle-stop is local-only (closing a remote handle frees nothing). Stopping
-never drops tool metadata — the server stays searchable and restarts on
-next call. Only in-flight tool calls guard the sweep; list/resource/prompt
-RPCs do not.
-
-Tool metadata persists in `<dir>/cache.json` (default `~/.oxyp/cache.json`;
-dir follows --dir > OXYP_DIR > XDG_CONFIG_HOME/oxyp > ~/.oxyp):
-list/describe work cold and survive restarts. Entries invalidate on
-fingerprint config change, removal/disable, upstream `list_changed`
-(stdio + SSE remotes), client reset, or a 5-min TTL revalidation for
-Streamable-HTTP remotes (search itself never revalidates/spawns).
-Over-limit tool text spills to `oxyp-output-*` temp files in os.TempDir()
-(0600); each spill prunes to the newest 100 files / 100 MiB / 24h
-(no background reaper — old spills linger until the next spill).
-
-Per-server opt-out for the daemon-wide output guard (table form only —
-scalar `output_guard = false` is a TOML type error):
-
-```toml
-[servers.noisy.output_guard]
-enabled = false
-```
-
-Per-server `trace.file` is rejected (daemon-level only); enabling trace on
-the daemon or any server opens the daemon trace file (per-server
-max_bytes/max_events are ignored; trace changes need a restart). The HTTP
-API checks bearer → Host → Origin → Content-Type (in that order, before
-routing): empty token = loopback trust ONLY (non-loopback + empty token
-fails load); loopback binds reject foreign `Host`/`Origin`; state-changing
-requests with a body require `Content-Type: application/json`.
-## Remote servers
-
-```toml
-[servers.glean]
-url = "https://company.glean.com/mcp"
-headers = { Authorization = "Bearer ${GLEAN_TOKEN}" }  # ${VAR}/{file:} expanded
-# transport = "sse"   # only for SSE-only endpoints; auto-fallback otherwise
-
-[servers.glean.tls]
-# ca_file = "/path/ca.crt"   # custom CA
-# cert_file/key_file = ...    # mTLS
-# insecure = true             # self-signed dev only
-```
-
-`${VAR}` and `{file:/abs/path}` expand at load; unset vars fail remote
-URL/header entries closed (local `env` keeps them literally; malformed
-`${X:-d}`/`${1}` pass literally). Redirects: POST preserved same-origin,
-cross-origin keeps only Accept/Content-Type/Mcp-Session-Id/
-MCP-Protocol-Version (credentials stripped), 4 redirects followed
-(5 requests total). Remote tool changes refresh on a 5-min TTL (stale
-served on revalidation failure); Streamable-HTTP remotes get no live push
-in this stack. Local stdio + SSE remotes still get live list_changed push.
-
-## Auth (daemon-held)
-
-Tokens live in `~/.oxyp/oauth/` (0600), owned by the daemon. Callers never
-see them. Different identity = second daemon (`--dir`).
-
-```toml
 [servers.github]
 url = "https://api.githubcopilot.com/mcp/"
 auth = "oauth"
 
 [servers.github.tools]
 allow = ["*"]
-deny = ["delete_*"]
+deny = ["delete_*"]       # deny = invisible + blocked, always wins
 
-[servers.github.oauth]
-flow = "browser"  # default
-# flow = "device" # headless: type code on any device (RFC 8628)
-# flow = "token"  # pre-seeded: verify static Authorization, no dance
-# grant_type = "client_credentials" # service account: id+secret, no browser
-# client_id/client_secret/scope/callback_port/timeout — all optional (DCR)
-# redirect_uri = "http://localhost:{port}/callback" # {port} = bound port
+[servers.notes]
+command = ["python3", "/srv/mcp/notes.py"]   # local stdio child
 ```
 
-```sh
-oxyp login github   # browser: open URL, approve, callback on ephemeral port
-                    # device: open verification_uri, type user_code
-                    # token: verifies the header works, reports ok/expired
-oxyp login --complete '<pasted-callback-url>' github  # no loopback? finish here
+Secrets ride `${VAR}` / `{file:/path}` — expanded at load, redacted in logs, never stored by oxyp. Drop executable one-file servers into `~/.oxyp/connectors/` and they're auto-discovered by filename. Bad entries degrade to "unhealthy" in `status`; they never kill the daemon.
+
+## How it works
+
+```text
+your client (Claude / Cursor / opencode / omp / hermes)
+  │  stdio MCP: initialize / tools/list / tools/call
+  ▼
+oxyp shim — 5 static meta-tools, instant answers, connects to nothing
+  │  HTTP + bearer to the localhost daemon (autostarts it)
+  ▼
+oxyp daemon — owns every downstream connection
+  ├── local children over stdio (spawned cold, stopped when idle)
+  ├── remotes over Streamable HTTP / legacy SSE
+  ├── cache.json — tool metadata on disk, searchable while asleep
+  └── oauth/ — daemon-held tokens (0600), clients never see them
 ```
 
-Browser login binds an OS-assigned port by default (`callback_port` pins
-:8378-style behavior; `redirect_uri` with `{port}` advertises it). A
-`redirect_uri` WITHOUT `{port}` names its own fixed port — the CLI binds it
-(a `callback_port` mismatch is an immediate error, not a hang).
-Any remote that 401s with `resource_metadata` is treated as OAuth even
-without `auth = "oauth"` (explicit `auth` forces it).
+## 🤖 For AI agents
 
-DCR registrations (`client_id`/`secret`/auth-method/issuer) persist per
-server as `<key>.client.json` next to the token, and pending browser flows
-carry the same credentials — so `login --complete` works cross-process and
-refresh survives daemon restarts, even against IdPs that validate
-`client_id`. Device and `client_credentials` token requests send
-`resource=<mcp URL>` (RFC 8707) for resource-enforcing servers.
+<details>
+<summary><b>Agent quickstart — expand, copy, paste to your agent</b></summary>
 
-## Usage
+```text
+Install oxyp (lazy MCP gateway) and connect it:
 
-```sh
-oxyp servers                # list (autostarts daemon if needed)
-oxyp tools <server>         # thin list (denied tools invisible — C1)
-oxyp search "query"         # ranked search across servers (never spawns)
-oxyp describe <server> <tool>
-oxyp call <server> <tool> '{"arg":1}'
-oxyp status                 # health per server
-oxyp reload                 # re-read config + connectors (or kill -HUP)
-oxyp login <server>        # oauth: browser/device/token per servers.oauth.flow
-oxyp doctor [--live] [--json]  # offline validation, or probe every server (15s each)
-oxyp add <url> [--name] [--write]  # probe + append a [servers.<name>] entry
-oxyp import [--from cursor|claude|vscode|opencode|omp|all] [--write]  # preview TOML, write on confirm
+1. Run: go install github.com/lirrensi/oxyp/cmd/oxyp@latest
+   (needs Go 1.21+; make sure ~/go/bin is on PATH)
+2. Run: oxyp servers            (autostarts the daemon)
+3. Migrate existing MCPs: oxyp import --write
+   (covers cursor/claude/vscode/opencode/omp)
+   …or add one: oxyp add <url> --name <name> --write
+4. If a server needs auth: oxyp login <name>
+   (browser flow; use the token flow with env-var secrets when headless)
+5. Point this client at the shim: {"command": "oxyp", "args": ["shim"]}
+   (absolute path from `which oxyp` if the client has no login shell)
+6. Verify: oxyp search "<a word>" and oxyp status
+
+Rules for using oxyp afterwards: you only ever see 5 tools.
+To use any downstream tool: search_tools → describe_commands → invoke_command.
+Never guess schemas — describe first.
 ```
 
-Raw daemon HTTP (no dedicated CLI verbs for resources/prompts — `curl` the daemon):
+</details>
 
-```sh
-curl $OXYP/servers/<name>/resources          # list + init instructions
-curl "$OXYP/servers/<name>/resources/<uri>"  # read one (?uri= also works)
-curl $OXYP/servers/<name>/prompts            # prompt templates (may be [])
-```
+## Honest limits
 
-Resources/prompts are live passthrough (they spawn cold servers; no disk
-cache — bodies are live data). Servers without support return `[]`.
+- **No per-call approval popups.** The daemon has no UI to ask through — permissions are config (`deny`/hide). Ask-gates belong on the client side of the pipe.
+- **The daemon's HTTP API is oxyp's own REST, not MCP.** Remote access is shim-over-ssh until a Streamable-HTTP server mode exists.
+- **One user per daemon dir** — a different identity is a second `--dir`.
+- **Proven, not promised:** 46 real GitHub tools through the daemon — search, schema, invoke — and this very repo was created with `oxyp call github create_repository`. Dogfooded on day one.
 
-MCP clients attach via the shim with one line:
+## Docs
 
-```json
-{ "command": ["oxyp", "shim"] }
-```
+- [overview](doc/overview.md) — architecture + system map
+- [daemon](doc/spec-daemon.md) — lifecycle, health, reload, idle sweep
+- [discovery](doc/spec-discovery.md) — cache, search, permissions
+- [OAuth](doc/spec-oauth.md) — 4 flows, DCR, auto-detect
+- [HTTP + shim](doc/spec-http-shim.md) — API, shim, media passthrough
+- [guard/secrets/config](doc/spec-guard.md) — output guard, trace, secrets
+- [CLI](doc/spec-cli.md) — every command, every flag
+- [clients](doc/CLIENTS.md) — opencode / omp / hermes attach notes
+- [stances](doc/PHILOSOPHY.md) — what oxyp refuses to do, and why
 
-The shim speaks `initialize` / `tools/list` / `tools/call` with the 5
-meta-tools (`search_tools` ranks by words over cached metadata, never
-spawns) and forwards to the daemon over HTTP. `invoke_command` passes
-downstream content blocks through natively — image/audio/resource blocks
-reach the client untouched (never textified), so vision-capable clients
-get real media.
+## Contributing
 
-## Build / test
+Issues and PRs welcome. Keep it boring, keep it portable: single binary, no keychain, no machine-bound state.
 
-```sh
-go build ./... && go test ./...
-```
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+*Twenty servers. Five tools. Zero context crap. 🐾*

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"oxyp/internal/config"
-	"oxyp/internal/daemon"
-	"oxyp/internal/meta"
+	"github.com/lirrensi/oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/daemon"
+	"github.com/lirrensi/oxyp/internal/meta"
 )
 
 // Armed guard caps giant text; disarmed guard passes it whole.

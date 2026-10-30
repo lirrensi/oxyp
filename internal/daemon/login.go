@@ -11,8 +11,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/client/transport"
 
-	"oxyp/internal/oauth"
-	"oxyp/internal/remhttp"
+	"github.com/lirrensi/oxyp/internal/oauth"
+	"github.com/lirrensi/oxyp/internal/remhttp"
 )
 
 // Login runs the OAuth flow for a server: browser (discovery + DCR via

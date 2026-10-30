@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lirrensi/oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/daemon"
 	"github.com/mark3labs/mcp-go/mcp"
-	"oxyp/internal/config"
-	"oxyp/internal/daemon"
 )
 
 func zooPath(t *testing.T, parts ...string) string {

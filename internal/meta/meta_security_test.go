@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lirrensi/oxyp/internal/daemon"
 	"github.com/mark3labs/mcp-go/mcp"
-	"oxyp/internal/daemon"
 )
 
 // gateHandler builds a meta handler whose gates run but whose mux never

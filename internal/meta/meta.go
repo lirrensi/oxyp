@@ -29,11 +29,11 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/lirrensi/oxyp/internal/daemon"
+	"github.com/lirrensi/oxyp/internal/outguard"
+	"github.com/lirrensi/oxyp/internal/perms"
+	"github.com/lirrensi/oxyp/internal/redact"
 	"github.com/mark3labs/mcp-go/mcp"
-	"oxyp/internal/daemon"
-	"oxyp/internal/outguard"
-	"oxyp/internal/perms"
-	"oxyp/internal/redact"
 )
 
 // Server wires HTTP handlers to a daemon + reload func.

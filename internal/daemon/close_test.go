@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lirrensi/oxyp/internal/config"
 	"github.com/mark3labs/mcp-go/client"
-	"oxyp/internal/config"
 )
 
 type countClient struct {

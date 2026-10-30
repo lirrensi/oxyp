@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/config"
 )
 
 func TestFixtures(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/config"
 )
 
 func TestRoundTrip(t *testing.T) {

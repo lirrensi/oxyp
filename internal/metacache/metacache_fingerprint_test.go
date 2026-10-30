@@ -3,7 +3,7 @@ package metacache
 import (
 	"testing"
 
-	"oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/config"
 )
 
 // Fingerprint matrix, split out per the assignment: every identity-relevant

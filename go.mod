@@ -1,4 +1,4 @@
-module oxyp
+module github.com/lirrensi/oxyp
 
 go 1.26.8
 

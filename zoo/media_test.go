@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"oxyp/internal/config"
-	"oxyp/internal/daemon"
-	"oxyp/internal/meta"
+	"github.com/lirrensi/oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/daemon"
+	"github.com/lirrensi/oxyp/internal/meta"
 )
 
 // Media must survive daemon → HTTP → shim as native blocks (research:

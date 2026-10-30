@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/config"
 )
 
 func TestResolveNilEntryAllows(t *testing.T) {

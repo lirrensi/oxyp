@@ -29,14 +29,14 @@ import (
 	"sync"
 	"time"
 
-	"oxyp/internal/config"
-	"oxyp/internal/metacache"
-	"oxyp/internal/oauth"
-	"oxyp/internal/perms"
-	"oxyp/internal/ptrace"
-	"oxyp/internal/redact"
-	"oxyp/internal/remhttp"
-	"oxyp/internal/search"
+	"github.com/lirrensi/oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/metacache"
+	"github.com/lirrensi/oxyp/internal/oauth"
+	"github.com/lirrensi/oxyp/internal/perms"
+	"github.com/lirrensi/oxyp/internal/ptrace"
+	"github.com/lirrensi/oxyp/internal/redact"
+	"github.com/lirrensi/oxyp/internal/remhttp"
+	"github.com/lirrensi/oxyp/internal/search"
 )
 
 const (

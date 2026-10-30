@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/config"
 )
 
 // Every testdata fixture must survive the full pipeline:

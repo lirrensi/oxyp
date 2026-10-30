@@ -4,7 +4,7 @@ import (
 	"sort"
 	"testing"
 
-	"oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/config"
 )
 
 func strSlicesEqual(a, b []string) bool {

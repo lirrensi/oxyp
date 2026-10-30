@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lirrensi/oxyp/internal/config"
 	"github.com/mark3labs/mcp-go/mcp"
-	"oxyp/internal/config"
 )
 
 func TestReloadUnchangedKeepsCaches(t *testing.T) {

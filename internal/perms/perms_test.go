@@ -3,7 +3,7 @@ package perms
 import (
 	"testing"
 
-	"oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/config"
 )
 
 func entry(p *config.ToolsPolicy) *config.ServerEntry {
@@ -11,7 +11,10 @@ func entry(p *config.ToolsPolicy) *config.ServerEntry {
 }
 
 func TestGlobBasics(t *testing.T) {
-	cases := []struct{ pattern, value string; want bool }{
+	cases := []struct {
+		pattern, value string
+		want           bool
+	}{
 		{"foo", "foo", true},
 		{"foo", "FOO", true},
 		{"list_*", "list_issues", true},

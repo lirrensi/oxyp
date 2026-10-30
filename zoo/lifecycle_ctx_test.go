@@ -15,9 +15,9 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
-	"oxyp/internal/config"
-	"oxyp/internal/daemon"
-	"oxyp/internal/meta"
+	"github.com/lirrensi/oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/daemon"
+	"github.com/lirrensi/oxyp/internal/meta"
 )
 
 // Two successive daemon calls with an INTERMEDIATE-CANCELLED ctx both

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"oxyp/internal/config"
-	"oxyp/internal/daemon"
+	"github.com/lirrensi/oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/daemon"
 )
 
 // Search runs on cached metadata only: warm the disk cache via one live

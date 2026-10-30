@@ -19,7 +19,7 @@ import (
 	"sort"
 	"strings"
 
-	"oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/config"
 )
 
 // Source is one third-party app and its candidate config files (first hit wins).

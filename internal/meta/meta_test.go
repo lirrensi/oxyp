@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/lirrensi/oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/daemon"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
-	"oxyp/internal/config"
-	"oxyp/internal/daemon"
 )
 
 // testServer builds an in-process streamable MCP server.

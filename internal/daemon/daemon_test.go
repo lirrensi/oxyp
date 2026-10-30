@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/config"
 )
 
 func testLog() *slog.Logger {

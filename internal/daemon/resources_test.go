@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/config"
 )
 
 // startHintServer serves one fixed body/status for probe tests.

@@ -9,8 +9,8 @@ import (
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"oxyp/internal/config"
-	"oxyp/internal/metacache"
+	"github.com/lirrensi/oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/metacache"
 )
 
 // sweepIdle must stop a stale local child but keep its discovery cache.

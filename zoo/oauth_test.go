@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"oxyp/internal/config"
-	"oxyp/internal/daemon"
-	"oxyp/internal/oauth"
+	"github.com/lirrensi/oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/daemon"
+	"github.com/lirrensi/oxyp/internal/oauth"
 )
 
 func startZooOAuth(t *testing.T, port int) {

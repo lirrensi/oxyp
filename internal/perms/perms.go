@@ -11,7 +11,7 @@ import (
 	"regexp"
 	"strings"
 
-	"oxyp/internal/config"
+	"github.com/lirrensi/oxyp/internal/config"
 )
 
 // Decision is the outcome for one (server, tool) pair.
