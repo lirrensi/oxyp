@@ -1,19 +1,57 @@
 # oxyp
 
-[![Go](https://img.shields.io/github/go-mod/go-version/lirrensi/oxyp)](https://go.dev/)
-[![License](https://img.shields.io/github/license/lirrensi/oxyp)](LICENSE)
+<p align="center">
+  <img src="https://img.shields.io/badge/version-0.2.0-blueviolet?style=flat-square" alt="Version 0.2.0" />
+  <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License" />
+  <img src="https://img.shields.io/github/go-mod/go-version/lirrensi/oxyp?style=flat-square" alt="Go version" />
+  <img src="https://img.shields.io/badge/mcp-stdio%2Bhttp-success?style=flat-square" alt="MCP stdio+http" />
+  <img src="https://img.shields.io/badge/binary-single_%E2%9C%93-orange?style=flat-square" alt="Single binary" />
+</p>
 
-**One daemon, every connector.** A lazy MCP gateway in Go: 20–30 MCP servers behind 5 tools — your agent's context never notices.
+<p align="center">
+  <strong>One daemon, every connector</strong> — a lazy MCP gateway in Go<br />
+  20–30 servers behind <em>5 tools</em> — your agent's context never notices.
+</p>
 
-## The problem
+<p align="center">
+  <em>Not schema spam on every turn. Cold connections, on-demand schemas,<br />
+  one TOML entry per server, tokens the client never sees.</em>
+</p>
 
-Every MCP server wired into an agent dumps its full tool list — names, descriptions, JSON schemas — into context on *every turn*. Two servers feel fine. Ten servers (≈300 tools) bury the model in schema spam: slower answers, dumber answers, bigger bills. And every add/remove/rekey means touching each client's config by hand.
+<p align="center">
+  <b>Two servers, twenty, or a hundred (I dare you)</b>
+</p>
 
-MCP servers *should* be easier to move around than a thousand tools. With oxyp, they are.
+<p align="center">
+  Alternative to wiring N servers into every client by hand.
+</p>
 
-## The fix: 5 tools, N servers
+---
 
-Point your client at oxyp instead of at N servers. Your agent sees exactly this, forever:
+## What is oxyp?
+
+oxyp is a **client-agnostic gateway** between your agents and your MCP servers. Instead of wiring N servers into every client — and paying full schema spam on every turn — each client gets **one stdio shim** with 5 static meta-tools. A localhost **daemon** owns every downstream connection and wakes it only when called.
+
+```
+┌──────────────────────────────────────────────────┐
+│  your client (Claude / Cursor / opencode / omp)  │
+│    one shim: 5 tools, forever                    │
+└───────────────────────┬──────────────────────────┘
+                        │ stdio MCP
+┌───────────────────────▼──────────────────────────┐
+│  oxyp shim — instant answers, connects to nothing│
+└───────────────────────┬──────────────────────────┘
+                        │ HTTP + bearer (autostarts daemon)
+┌───────────────────────▼──────────────────────────┐
+│  oxyp daemon — owns every connection             │
+│   ├── local children (cold → spawn → idle-stop)  │
+│   ├── remotes (Streamable HTTP / legacy SSE)     │
+│   ├── cache.json — schemas on disk, searchable   │
+│   └── oauth/ — 0600 tokens, clients never see    │
+└──────────────────────────────────────────────────┘
+```
+
+Your agent sees exactly this, forever:
 
 | Tool | Does |
 | ---- | ---- |
@@ -23,12 +61,43 @@ Point your client at oxyp instead of at N servers. Your agent sees exactly this,
 | `describe_tool` | full schemas for named tools, on demand |
 | `call` | run it |
 
-Context stays flat whether you have 2 servers or 30: schemas load only for the tool about to be called. Connections stay cold until first use, idle children stop themselves, and tool metadata lives on disk — search works even with everything asleep.
+Context stays flat whether you have 2 servers or 30: schemas load only for the tool about to be called. Add one server, remove one, hide a tool — the agent's config never changes; it still sees the same 5 tools.
 
-Servers become one TOML entry each. Add one, remove one, hide a tool — the agent's config never changes; it still sees the same 5 tools.
+---
 
-The grown-up bits are included: daemon-held OAuth (browser / device / token / service flows, tokens in `0600` files the client never sees), deny-means-invisible permissions, an output guard with spill files, live doctoring, and one-file `connectors/` auto-discovery.
+## What it can do
 
+Everything below runs behind those 5 tools — agents drive it through the shim, humans use the CLI against the same daemon.
+
+### 🔍 Search everything, spawn nothing
+
+`search_tools` ranks across **all** servers by words (name/server/description, regex + pagination). It reads `cache.json` on disk — cold servers stay cold, asleep children stay asleep, answers stay instant.
+
+### 💤 Laziness as a feature
+
+Connections start cold, spawn on first use, stop themselves when idle. Tool metadata lives on disk so discovery works with zero children running. Your laptop fans never notice 30 servers.
+
+### 🔐 OAuth the client never sees
+
+Browser / device / token / service flows, DCR + auto-detect, tokens in `0600` files held by the daemon. The client gets results, never credentials. Headless? Token flow with `${VAR}` / `{file:/path}` secrets.
+
+### 🙈 Deny means invisible
+
+Per-server `allow`/`deny` globs — denied tools vanish from list/describe/search AND block on call, always wins over allow. Whole servers park with `enabled = false`. No approval popups: the daemon has no UI, permissions are config.
+
+### ✂️ Output guard with spill files
+
+Downstream text gets size-capped with spill-to-disk + `file://` pointer; image/audio/resource blocks pass through untouched so vision clients get real media. Secrets ride `${VAR}` / `{file:}` — expanded at load, redacted in logs, never stored.
+
+### 🩺 Doctor, reload, import
+
+`doctor [--live]` validates config or probes every server for real. `reload` (or `kill -HUP`) re-reads config without dropping healthy children. `import` converts Cursor/Claude/VS Code/opencode/omp configs to oxyp TOML. `connectors/` auto-discovers one-file servers by filename.
+
+### 🛠️ Three ways to drive it
+
+MCP shim (any client, one `{command: oxyp, args: [shim]}` line), CLI (`servers / tools / search / describe / call / status …`), and the daemon's own localhost REST. Same servers, same gates, same cache — pick your surface.
+
+---
 ## Install — one copy-paste
 
 Prerequisite: Go 1.21+ (the toolchain auto-upgrades to whatever oxyp needs).
@@ -112,22 +181,6 @@ command = ["python3", "/srv/mcp/notes.py"]   # local stdio child
 ```
 
 Secrets ride `${VAR}` / `{file:/path}` — expanded at load, redacted in logs, never stored by oxyp. Drop executable one-file servers into `~/.oxyp/connectors/` and they're auto-discovered by filename. Bad entries degrade to "unhealthy" in `status`; they never kill the daemon.
-
-## How it works
-
-```text
-your client (Claude / Cursor / opencode / omp / hermes)
-  │  stdio MCP: initialize / tools/list / tools/call
-  ▼
-oxyp shim — 5 static meta-tools, instant answers, connects to nothing
-  │  HTTP + bearer to the localhost daemon (autostarts it)
-  ▼
-oxyp daemon — owns every downstream connection
-  ├── local children over stdio (spawned cold, stopped when idle)
-  ├── remotes over Streamable HTTP / legacy SSE
-  ├── cache.json — tool metadata on disk, searchable while asleep
-  └── oauth/ — daemon-held tokens (0600), clients never see them
-```
 
 ## 🤖 For AI agents
 
