@@ -142,6 +142,41 @@ command: oxyp
 args: [shim]
 ```
 
+## Remote: your servers, from anywhere on the LAN
+
+One daemon at home, every laptop/agent pointing at it. On the box that
+hosts the daemon:
+
+```toml
+[daemon]
+addr = "0.0.0.0:8379"
+token = "{file:~/.oxyp/bearer}"   # required for non-loopback — plain HTTP, home nets only
+```
+
+On any other machine (needs only the `oxyp` binary, no config):
+
+```bash
+export OXYP_URL=http://192.168.1.10:8379 OXYP_TOKEN=$(cat ~/.oxyp/bearer)
+oxyp servers        # talks to home, never spawns locally
+oxyp search "pull requests"
+oxyp call github get_me '{}'
+```
+
+Same for the shim — put `OXYP_URL`/`OXYP_TOKEN` in the client's `env`
+and the 5 meta-tools proxy to home:
+
+```json
+{ "command": "oxyp", "args": ["shim"],
+  "env": { "OXYP_URL": "http://192.168.1.10:8379", "OXYP_TOKEN": "…" } }
+```
+
+Rules: only `http(s)://host[:port]` parses (bad value = hard error, no
+silent local fallback); unreachable remotes fail fast, never autostart;
+`daemon`/`stop`/`restart`/`login`/`doctor`/`add`/`import` are local-only
+and refuse with `OXYP_URL` set — run them where the daemon lives. Token
+goes over plain HTTP, so this is for trusted LANs or `ssh -L` tunnels,
+never the open internet.
+
 ## CLI cheat sheet
 
 | Command | What it does |
@@ -212,7 +247,7 @@ Never guess schemas — describe first.
 ## Honest limits
 
 - **No per-call approval popups.** The daemon has no UI to ask through — permissions are config (`deny`/hide). Ask-gates belong on the client side of the pipe.
-- **The daemon's HTTP API is oxyp's own REST, not MCP.** Remote access is shim-over-ssh until a Streamable-HTTP server mode exists.
+- **The daemon's HTTP API is oxyp's own REST, not MCP.** MCP clients attach via the shim (local or `OXYP_URL` remote); pointing a raw MCP client at the daemon URL won't speak MCP.
 - **One user per daemon dir** — a different identity is a second `--dir`.
 - **Proven, not promised:** 46 real GitHub tools through the daemon — search, schema, invoke — and this very repo was created with `oxyp call github create_repository`. Dogfooded on day one.
 

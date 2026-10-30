@@ -70,11 +70,30 @@ beats all dir resolution): `daemon`, `call`, `servers`, `tools`, `search`,
 | `add` | `<url>`; `--name/--write` | probe + append `[servers.<name>]` |
 | `import` | `--from all\|cursor\|claude\|vscode\|opencode\|omp`; `--write` | preview + append foreign servers |
 
-Shared: 60 s HTTP client, bearer from `daemon.json`, pretty JSON print,
-`exit 1` on Cobra errors and checked ≥400s. Autostart: read endpoint
-(reject empty URL / `PID ≤ 0` / dead PID), probe `/health` (2 s timeout),
-else spawn `oxyp daemon --dir <dir>` and poll 50×100 ms (≈5 s) or fail
-`daemon did not come up`.
+Shared: 60 s HTTP client, bearer from `daemon.json` (or `OXYP_TOKEN` in
+remote mode), pretty JSON print, `exit 1` on Cobra errors and checked
+≥400s. Autostart: read endpoint (reject empty URL / `PID ≤ 0` / dead
+PID), probe `/health` (2 s timeout), else spawn `oxyp daemon --dir <dir>`
+and poll 50×100 ms (≈5 s) or fail `daemon did not come up`.
+
+Remote mode: when `OXYP_URL` is set (non-blank), CLI + shim dial it
+directly (`OXYP_TOKEN` as bearer, may be empty when the daemon runs
+tokenless loopback behind an SSH forward): no endpoint file is read or
+written, no autostart, no PID checks; only `http(s)://host[:port]`
+parses (path/query/fragment stripped, userinfo rejected) and a
+set-but-invalid value is a hard `bad OXYP_URL` error, never a silent
+local fallback. Unreachable remotes fail fast (`remote daemon <url>
+unreachable`), never spawning locally. Local-only commands —
+`daemon`, `stop`, `restart`, `login`, `doctor`, `add`, `import` —
+refuse with a `local-only (OXYP_URL is set …)` error: process control
+and config/oauth edits must run where the daemon lives. The shim works
+remotely unchanged: set `OXYP_URL`/`OXYP_TOKEN` in the MCP client's
+`env` and the 5 meta-tools proxy to the home daemon.
+
+Wildcard binds: a daemon on `0.0.0.0`/`[::]`/`:port` (token required,
+plain HTTP — home nets / SSH-forward only, never the open internet)
+writes a dialable `127.0.0.1` URL into its local endpoint file, so the
+on-box CLI/shim attach works while LAN peers dial the LAN IP + token.
 
 #### Scenario: First command boots the daemon
 

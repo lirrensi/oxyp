@@ -66,9 +66,9 @@ func TestEndpointRoundTripAndMode(t *testing.T) {
 	if err := writeEndpoint(e); err != nil {
 		t.Fatalf("writeEndpoint: %v", err)
 	}
-	got := readEndpoint()
+	got := readLocalEndpoint()
 	if got == nil {
-		t.Fatal("readEndpoint returned nil for live pid")
+		t.Fatal("readLocalEndpoint returned nil for live pid")
 	}
 	if got.URL != e.URL || got.Token != e.Token || got.PID != e.PID {
 		t.Fatalf("round trip mismatch: %+v", got)
@@ -82,7 +82,7 @@ func TestEndpointRoundTripAndMode(t *testing.T) {
 	}
 }
 
-// --- readEndpoint malformed/empty-URL/PID cases ---
+// --- readLocalEndpoint malformed/empty-URL/PID cases ---
 
 func TestReadEndpointRejectsBad(t *testing.T) {
 	dir := t.TempDir()
@@ -97,23 +97,23 @@ func TestReadEndpointRejectsBad(t *testing.T) {
 		}
 	}
 	// missing file -> nil
-	if got := readEndpoint(); got != nil {
+	if got := readLocalEndpoint(); got != nil {
 		t.Fatalf("missing file: got %+v", got)
 	}
 	writeRaw(`{not json`)
-	if got := readEndpoint(); got != nil {
+	if got := readLocalEndpoint(); got != nil {
 		t.Fatalf("malformed: got %+v", got)
 	}
 	writeRaw(`{"url":"","pid":123,"token":"t"}`)
-	if got := readEndpoint(); got != nil {
+	if got := readLocalEndpoint(); got != nil {
 		t.Fatalf("empty URL: got %+v", got)
 	}
 	writeRaw(`{"url":"http://x","pid":0,"token":"t"}`)
-	if got := readEndpoint(); got != nil {
+	if got := readLocalEndpoint(); got != nil {
 		t.Fatalf("PID 0: got %+v", got)
 	}
 	writeRaw(fmt.Sprintf(`{"url":"http://127.0.0.1:9","pid":%d,"token":"t"}`, os.Getpid()))
-	if got := readEndpoint(); got == nil {
+	if got := readLocalEndpoint(); got == nil {
 		t.Fatal("live PID must be non-nil")
 	}
 	// dead PID (kill -0 fails): current behavior returns nil.
@@ -124,7 +124,7 @@ func TestReadEndpointRejectsBad(t *testing.T) {
 	}
 	dead := cmd.Process.Pid
 	writeRaw(fmt.Sprintf(`{"url":"http://127.0.0.1:9","pid":%d,"token":"t"}`, dead))
-	if got := readEndpoint(); got != nil {
+	if got := readLocalEndpoint(); got != nil {
 		t.Fatalf("dead PID: current behavior must be nil, got %+v", got)
 	}
 }

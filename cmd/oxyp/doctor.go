@@ -31,6 +31,9 @@ func doctorCmd() *cobra.Command {
 		Use:   "doctor",
 		Short: "validate config (offline) or probe every server (--live)",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := requireLocal("doctor"); err != nil {
+				return err
+			}
 			dir := oxypDir()
 			cfg, err := config.Load(dir)
 			if err != nil {

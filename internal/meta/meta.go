@@ -21,6 +21,7 @@
 package meta
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,7 +73,7 @@ func (s *Server) SetIdentity(pid int, startedAt string) {
 
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.token != "" && r.Header.Get("Authorization") != "Bearer "+s.token {
+		if s.token != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.token)) != 1 {
 			writeErr(w, http.StatusUnauthorized, "missing or wrong bearer token")
 			return
 		}

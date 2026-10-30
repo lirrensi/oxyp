@@ -91,9 +91,10 @@ even 404/405 targets can yield 401/403/415.
 **I want** browser pages unable to drive my tools
 **So that** visiting a page cannot delete my files.
 
-Rules: bearer — when `token != ""`, require exact
-`Authorization: Bearer <token>` (failure 401, no `auth_required`); empty
-token means loopback trust. Host — enforced only on loopback binds
+Rules: bearer — when `token != ""`, require
+`Authorization: Bearer <token>` compared in constant time (failure 401,
+no `auth_required`); empty token means loopback trust. Host — enforced
+only on loopback binds
 (malformed addr fails closed); accept only `localhost`/loopback after
 split/lower/bracket-strip (failure 403); non-loopback and `:port` binds
 accept any Host (token is the defense). Origin — absent passes; present
@@ -148,7 +149,8 @@ serverInfo: {name: oxyp, version}, capabilities: {tools: {}}}`,
 unknown → `-32000`, over pure-JSONL stdout (1 MiB–64 MiB lines, blanks
 skipped, undecodable lines silently ignored, every response one JSON
 object + `\n`), autostarting/reusing the daemon over HTTP (60 s client,
-bearer when set). All errors use code `-32000`.
+bearer when set; `OXYP_URL`/`OXYP_TOKEN` dial a remote daemon instead —
+see the CLI spec). All errors use code `-32000`.
 
 **As a** MCP client (hermes/omp/opencode)
 **I want** the strictest-common-denominator server

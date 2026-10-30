@@ -63,6 +63,9 @@ func addCmd() *cobra.Command {
 		Short: "validate + probe a remote URL and append a [servers.<name>] entry",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if err := requireLocal("add"); err != nil {
+				return err
+			}
 			dir := oxypDir()
 			rawurl := strings.TrimSpace(args[0])
 

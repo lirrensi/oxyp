@@ -18,6 +18,9 @@ func importCmd() *cobra.Command {
 		Use:   "import [--from cursor|claude|vscode|opencode|omp|all] [--write]",
 		Short: "preview third-party MCP configs as oxyp TOML, write on confirmation",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := requireLocal("import"); err != nil {
+				return err
+			}
 			from := strings.ToLower(strings.TrimSpace(fromFlag))
 			if from == "" {
 				from = "all"

@@ -25,6 +25,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -63,11 +64,50 @@ type endpoint struct {
 	PID       int    `json:"pid"`
 	Token     string `json:"token"`
 	StartedAt string `json:"startedAt"`
+	Remote    bool   `json:"-"`
 }
 
 func endpointPath() string { return filepath.Join(oxypDir(), "daemon.json") }
 
-func readEndpoint() *endpoint {
+// remoteConfigured reports whether OXYP_URL names a remote daemon.
+func remoteConfigured() bool {
+	return strings.TrimSpace(os.Getenv("OXYP_URL")) != ""
+}
+
+// requireLocal refuses local-only commands (daemon/process control and
+// local-dir editors) when OXYP_URL points at a remote daemon.
+func requireLocal(cmd string) error {
+	if remoteConfigured() {
+		return fmt.Errorf("oxyp %s is local-only (OXYP_URL is set — run it where the daemon lives)", cmd)
+	}
+	return nil
+}
+
+// remoteEndpoint builds an endpoint from OXYP_URL/OXYP_TOKEN when set.
+// Remote mode: configured URL + token, no autostart, no PID. callers dial
+// it directly and never spawn or signal anything local. A set-but-invalid
+// OXYP_URL is a hard error (never silent fallback to the local daemon).
+func remoteEndpoint() (*endpoint, error) {
+	raw := strings.TrimSpace(os.Getenv("OXYP_URL"))
+	if raw == "" {
+		return nil, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("bad OXYP_URL %q: want http(s)://host[:port]", raw)
+	}
+	if u.User != nil {
+		return nil, fmt.Errorf("bad OXYP_URL %q: userinfo not allowed (use OXYP_TOKEN)", raw)
+	}
+	u.Path, u.RawPath, u.RawQuery, u.Fragment = "", "", "", ""
+	return &endpoint{URL: strings.TrimSuffix(u.String(), "/"), Token: strings.TrimSpace(os.Getenv("OXYP_TOKEN")), Remote: true}, nil
+}
+
+// isRemote reports whether the endpoint is a remote (OXYP_URL) one.
+// Remote endpoints carry Remote=true: no local process to signal or check.
+func (e *endpoint) isRemote() bool { return e != nil && e.Remote }
+
+func readLocalEndpoint() *endpoint {
 	b, err := os.ReadFile(endpointPath())
 	if err != nil {
 		return nil
@@ -91,6 +131,20 @@ func writeEndpoint(e endpoint) error {
 	return os.WriteFile(endpointPath(), b, 0o600)
 }
 
+// localDialURL rewrites wildcard binds (0.0.0.0/[::]/empty host) to
+// 127.0.0.1 so local CLI/shim attach works. Non-wildcard addrs pass
+// through untouched.
+func localDialURL(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "http://" + addr
+	}
+	if ip := net.ParseIP(strings.Trim(host, "[]")); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
 // --- daemon ---
 
 func daemonCmd() *cobra.Command {
@@ -98,6 +152,9 @@ func daemonCmd() *cobra.Command {
 		Use:   "daemon",
 		Short: "run the daemon in foreground",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := requireLocal("daemon"); err != nil {
+				return err
+			}
 			dir := oxypDir()
 			cfg, err := config.Load(dir)
 			if err != nil {
@@ -123,7 +180,7 @@ func daemonCmd() *cobra.Command {
 			// Pre-flight: our own daemon already owns this dir+addr? Exit clean
 			// instead of dying on bind — a second `daemon` (or a racing
 			// autostart) is a no-op, not a failure.
-			if e := readEndpoint(); e != nil && e.URL == "http://"+cfg.Daemon.Addr {
+			if e := readLocalEndpoint(); e != nil && e.URL == localDialURL(cfg.Daemon.Addr) {
 				if pid, started, ok := probeOxyp(e.URL, cfg.Daemon.Token); ok {
 					fmt.Fprintf(os.Stderr, "oxyp daemon already running (pid %d, started %s)\n", pid, started)
 					return nil
@@ -159,14 +216,14 @@ func daemonCmd() *cobra.Command {
 				// Bind failed — but WHO holds the port? Ours (stale
 				// endpoint, racing autostart) is a clean no-op; a
 				// stranger is the only real failure.
-				if pid, started, ok := probeOxyp("http://"+cfg.Daemon.Addr, cfg.Daemon.Token); ok {
+				if pid, started, ok := probeOxyp(localDialURL(cfg.Daemon.Addr), cfg.Daemon.Token); ok {
 					fmt.Fprintf(os.Stderr, "oxyp daemon already running (pid %d, started %s)\n", pid, started)
 					return nil
 				}
 				return fmt.Errorf("listen %s: %w (not our daemon — something else holds the port)", cfg.Daemon.Addr, err)
 			}
 			if err := writeEndpoint(endpoint{
-				URL: "http://" + cfg.Daemon.Addr, PID: os.Getpid(),
+				URL: localDialURL(cfg.Daemon.Addr), PID: os.Getpid(),
 				Token: cfg.Daemon.Token, StartedAt: startedAt,
 			}); err != nil {
 				return err
@@ -216,7 +273,15 @@ func traceEnabled(cfg *config.Config) bool {
 // --- client helpers (autostart daemon if needed) ---
 
 func ensureDaemon() (*endpoint, error) {
-	if e := readEndpoint(); e != nil {
+	if e, err := remoteEndpoint(); err != nil {
+		return nil, err
+	} else if e != nil {
+		if !alive(e) {
+			return nil, fmt.Errorf("remote daemon %s unreachable (check OXYP_URL/OXYP_TOKEN)", e.URL)
+		}
+		return e, nil
+	}
+	if e := readLocalEndpoint(); e != nil {
 		if alive(e) {
 			return e, nil
 		}
@@ -235,7 +300,7 @@ func ensureDaemon() (*endpoint, error) {
 	// wait for endpoint + health, ~5s
 	for range 50 {
 		time.Sleep(100 * time.Millisecond)
-		if e := readEndpoint(); e != nil && alive(e) {
+		if e := readLocalEndpoint(); e != nil && alive(e) {
 			return e, nil
 		}
 	}
@@ -299,7 +364,7 @@ func probeOxyp(baseURL, token string) (pid int, startedAt string, ok bool) {
 	if p, err := os.FindProcess(v.PID); err != nil || p.Signal(syscall.Signal(0)) != nil {
 		return 0, "", false
 	}
-	if e := readEndpoint(); e != nil && e.PID != v.PID {
+	if e := readLocalEndpoint(); e != nil && e.PID != v.PID {
 		return 0, "", false
 	}
 	return v.PID, v.StartedAt, true
@@ -550,10 +615,14 @@ func restartCmd() *cobra.Command {
 
 // stopDaemon SIGTERMs the endpoint PID and waits for the process to exit
 // (~5s grace, then SIGKILL). A missing/dead endpoint is a clean false —
-// stopping something that isn't running is not an error. Returns true
-// when it actually stopped a live daemon.
+// stopping something that isn't running is not an error. Remote mode
+// (OXYP_URL) is refused: there is no local process to signal. Returns
+// true when it actually stopped a live daemon.
 func stopDaemon() (bool, error) {
-	e := readEndpoint()
+	if err := requireLocal("stop"); err != nil {
+		return false, err
+	}
+	e := readLocalEndpoint()
 	if e == nil {
 		return false, nil
 	}
@@ -598,6 +667,9 @@ func loginCmd() *cobra.Command {
 		Short: "OAuth login for a remote server (daemon-held tokens)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := requireLocal("login"); err != nil {
+				return err
+			}
 			dir := oxypDir()
 			cfg, err := config.Load(dir)
 			if err != nil {

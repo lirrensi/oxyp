@@ -319,6 +319,11 @@ Verification: `V-CLI-001`, `V-DAEMON-001`.
   empty token; loopback detection fails closed on empty/unparseable hosts.
 - Reload MUST NOT swap the bearer token or listener without a restart.
 - `daemon.json` holds the bearer token; fresh files MUST be 0600.
+- Non-loopback binds (e.g. `0.0.0.0`) are plain HTTP: the bearer check
+  (constant-time) is the only defense. Supported for trusted home nets
+  and SSH forwards; never expose to the open internet. The local
+  endpoint file records a dialable `127.0.0.1` URL so on-box clients
+  attach while LAN peers dial the LAN IP + `OXYP_TOKEN`.
 
 ## Limits
 
