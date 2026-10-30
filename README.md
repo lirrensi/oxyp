@@ -173,6 +173,13 @@ Never guess schemas — describe first.
 - [clients](doc/CLIENTS.md) — opencode / omp / hermes attach notes
 - [stances](doc/PHILOSOPHY.md) — what oxyp refuses to do, and why
 
+## Acknowledgments
+
+Clean rewrite, no fork — but the good ideas are borrowed with love:
+
+- [mozilla-ai/mcpd](https://github.com/mozilla-ai/mcpd) — daemon lifecycle, stderr piping, health pings, TOML config, SIGHUP reload
+- [gitlab-org/ai/lazy-mcp](https://gitlab.com/gitlab-org/ai/lazy-mcp) — the lazy meta-tools shape (list → describe → invoke), lazy connect, glob permissions
+
 ## Contributing
 
 Issues and PRs welcome. Keep it boring, keep it portable: single binary, no keychain, no machine-bound state.
