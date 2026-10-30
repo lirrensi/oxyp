@@ -1,0 +1,4 @@
+{"mcpServers": {
+  "fetch": {"command": "npx", "args": ["-y", "mcp-server-fetch"]},
+  "linear": {"type": "http", "url": "https://mcp.linear.app/mcp", "headers": {"Authorization": "Bearer lin_x"}}
+}}

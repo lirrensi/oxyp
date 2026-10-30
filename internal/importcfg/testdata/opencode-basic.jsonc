@@ -1,0 +1,18 @@
+{
+  // opencode remote + local shapes (doc/CLIENTS.md §1)
+  "mcp": {
+    "local-thing": {
+      "type": "local",
+      "command": ["bun", "x", "my-server"], // trailing comment
+      "environment": {"FOO": "bar"},
+      "enabled": true
+      /* block comment */
+    },
+    "api": {
+      "type": "remote",
+      "url": "https://api.example.com/mcp",
+      "headers": {"X-Token": "t"},
+      "oauth": {"issuer": "https://auth.example.com"}
+    }
+  }
+}

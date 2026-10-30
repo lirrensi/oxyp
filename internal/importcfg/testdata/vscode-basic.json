@@ -1,0 +1,4 @@
+{"mcp": {"servers": {
+  "memory": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"]},
+  "remote-sse": {"type": "sse", "url": "http://localhost:8000/sse"}
+}}}

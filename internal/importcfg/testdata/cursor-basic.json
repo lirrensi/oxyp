@@ -1,0 +1,5 @@
+{"mcpServers": {
+  "sqlite": {"command": "uvx", "args": ["mcp-server-sqlite", "--db-path", "/tmp/app.db"], "env": {"UV_CACHE": "/tmp/uv"}},
+  "glean": {"url": "https://company.glean.com/mcp", "headers": {"Authorization": "Bearer abc123"}},
+  "gh-oauth": {"url": "https://api.githubcopilot.com/mcp/", "auth": {"type": "oauth"}}
+}}

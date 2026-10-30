@@ -1,0 +1,34 @@
+# Binaries
+oxyp
+*.exe
+*.out
+
+# Go build cache / coverage
+*.test
+*.prof
+coverage.out
+coverage.html
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local oxyp runtime (never commit live state)
+.oxyp/
+daemon.json
+cache.json
+trace.jsonl
+oauth/
+
+# Python zoo bytecode
+__pycache__/
+*.pyc
+
+# Temp spill / test leftovers
+oxyp-output-*.txt
+.cache-*.tmp
+.tok-*.tmp
