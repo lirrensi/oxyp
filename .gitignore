@@ -19,11 +19,11 @@ coverage.html
 Thumbs.db
 
 # Local oxyp runtime (never commit live state)
-.oxyp/
-daemon.json
-cache.json
-trace.jsonl
-oauth/
+/.oxyp/
+/daemon.json
+/cache.json
+/trace.jsonl
+/oauth/
 
 # Python zoo bytecode
 __pycache__/
