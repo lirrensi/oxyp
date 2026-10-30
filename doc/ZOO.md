@@ -114,8 +114,8 @@ case-insensitive, 8 KiB bound).
 | opencode | `mcp.<name> type: local` | untested |
 
 Shim speaks `initialize/2024-11-05 + tools/list + tools/call + ping`,
-static 5 tools (`list_servers`, `list_commands`, `describe_commands`,
-`invoke_command`, `search_tools`), stdout pure JSONL — matches every
+static 5 tools (`list_servers`, `list_tools`, `describe_tool`,
+`call`, `search_tools`), stdout pure JSONL — matches every
 client's strictest requirements. Live-client test = next quest
 (see `V-ZOO-005` in [verification/strategy](verification/strategy.md) —
 currently missing).

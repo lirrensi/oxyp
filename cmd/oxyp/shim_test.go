@@ -134,15 +134,15 @@ func TestDispatchSearchToolsEncoding(t *testing.T) {
 	}
 }
 
-func TestDispatchListCommands(t *testing.T) {
+func TestDispatchListTools(t *testing.T) {
 	fb := &fakeBackend{}
-	if _, err := dispatchNative(fb.get, fb.post, "list_commands", map[string]any{}); err == nil ||
+	if _, err := dispatchNative(fb.get, fb.post, "list_tools", map[string]any{}); err == nil ||
 		!strings.Contains(err.Error(), "server required") {
 		t.Fatalf("missing server err = %v", err)
 	}
 	srv := "a/b%c\n"
 	want := "/servers/" + url.PathEscape(srv) + "/tools"
-	if _, err := dispatchNative(fb.get, fb.post, "list_commands", map[string]any{"server": srv}); err != nil {
+	if _, err := dispatchNative(fb.get, fb.post, "list_tools", map[string]any{"server": srv}); err != nil {
 		t.Fatal(err)
 	}
 	if fb.gotGet[len(fb.gotGet)-1] != want {
@@ -150,14 +150,14 @@ func TestDispatchListCommands(t *testing.T) {
 	}
 }
 
-func TestDispatchDescribeCommandsCurrent(t *testing.T) {
+func TestDispatchDescribeToolCurrent(t *testing.T) {
 	fb := &fakeBackend{}
 	// current behavior: missing server -> error
-	if _, err := dispatchNative(fb.get, fb.post, "describe_commands", map[string]any{}); err == nil {
+	if _, err := dispatchNative(fb.get, fb.post, "describe_tool", map[string]any{}); err == nil {
 		t.Fatal("missing server must error")
 	}
-	// current behavior: absent command_names silently returns empty schemas (documented).
-	res, err := dispatchNative(fb.get, fb.post, "describe_commands", map[string]any{"server": "s"})
+	// current behavior: absent tools silently returns empty schemas (documented).
+	res, err := dispatchNative(fb.get, fb.post, "describe_tool", map[string]any{"server": "s"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,11 +166,11 @@ func TestDispatchDescribeCommandsCurrent(t *testing.T) {
 	if schemas, ok := m["schemas"].([]any); !ok || len(schemas) != 0 {
 		// nil serializes as null; accept both null and [].
 		if m["schemas"] != nil {
-			t.Fatalf("current behavior: absent command_names -> empty/null schemas, got %v", m)
+			t.Fatalf("current behavior: absent tools -> empty/null schemas, got %v", m)
 		}
 	}
 	// wrong type (string) also silently empty.
-	res, err = dispatchNative(fb.get, fb.post, "describe_commands", map[string]any{"server": "s", "command_names": "nope"})
+	res, err = dispatchNative(fb.get, fb.post, "describe_tool", map[string]any{"server": "s", "tools": "nope"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,8 +178,8 @@ func TestDispatchDescribeCommandsCurrent(t *testing.T) {
 
 	// mixed types: non-strings skipped.
 	fb2 := &fakeBackend{getVals: map[string]any{"/servers/s/tools/ok": map[string]any{"name": "ok"}}}
-	res, err = dispatchNative(fb2.get, fb2.post, "describe_commands",
-		map[string]any{"server": "s", "command_names": []any{"ok", float64(3), "", nil}})
+	res, err = dispatchNative(fb2.get, fb2.post, "describe_tool",
+		map[string]any{"server": "s", "tools": []any{"ok", float64(3), "", nil}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,27 +190,27 @@ func TestDispatchDescribeCommandsCurrent(t *testing.T) {
 	}
 	// upstream error surfaces.
 	fb3 := &fakeBackend{getErr: map[string]error{"/servers/s/tools/bad": fmt.Errorf("daemon 404: nope")}}
-	if _, err := dispatchNative(fb3.get, fb3.post, "describe_commands",
-		map[string]any{"server": "s", "command_names": []any{"bad"}}); err == nil {
+	if _, err := dispatchNative(fb3.get, fb3.post, "describe_tool",
+		map[string]any{"server": "s", "tools": []any{"bad"}}); err == nil {
 		t.Fatal("upstream error must surface")
 	}
 }
 
-func TestDispatchInvokeCommand(t *testing.T) {
+func TestDispatchCall(t *testing.T) {
 	fb := &fakeBackend{}
 	for _, args := range []map[string]any{
 		{},
 		{"server": "s"},
-		{"command_name": "c"},
+		{"tool": "c"},
 	} {
-		if _, err := dispatchNative(fb.get, fb.post, "invoke_command", args); err == nil {
+		if _, err := dispatchNative(fb.get, fb.post, "call", args); err == nil {
 			t.Fatalf("args %v must error", args)
 		}
 	}
 	// non-map parameters silently become {} (current behavior).
 	fb2 := &fakeBackend{postVals: map[string]any{"/servers/s/tools/c": map[string]any{"content": []any{}}}}
-	if _, err := dispatchNative(fb2.get, fb2.post, "invoke_command",
-		map[string]any{"server": "s", "command_name": "c", "parameters": "nope"}); err != nil {
+	if _, err := dispatchNative(fb2.get, fb2.post, "call",
+		map[string]any{"server": "s", "tool": "c", "parameters": "nope"}); err != nil {
 		t.Fatal(err)
 	}
 	body := fb2.gotBody[len(fb2.gotBody)-1].(map[string]any)
@@ -219,13 +219,13 @@ func TestDispatchInvokeCommand(t *testing.T) {
 	}
 	// empty map forwarded verbatim.
 	fb3 := &fakeBackend{postVals: map[string]any{"/servers/s/tools/c": map[string]any{"content": []any{}}}}
-	if _, err := dispatchNative(fb3.get, fb3.post, "invoke_command",
-		map[string]any{"server": "s", "command_name": "c"}); err != nil {
+	if _, err := dispatchNative(fb3.get, fb3.post, "call",
+		map[string]any{"server": "s", "tool": "c"}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestDispatchInvokeVerbatimForward(t *testing.T) {
+func TestDispatchCallVerbatimForward(t *testing.T) {
 	downstream := map[string]any{
 		"content": []any{
 			map[string]any{"type": "text", "text": "hi"},
@@ -237,8 +237,8 @@ func TestDispatchInvokeVerbatimForward(t *testing.T) {
 		"isError":           true,
 	}
 	fb := &fakeBackend{postVals: map[string]any{"/servers/s/tools/c": downstream}}
-	res, err := dispatchNative(fb.get, fb.post, "invoke_command",
-		map[string]any{"server": "s", "command_name": "c", "parameters": map[string]any{"a": 1}})
+	res, err := dispatchNative(fb.get, fb.post, "call",
+		map[string]any{"server": "s", "tool": "c", "parameters": map[string]any{"a": 1}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,8 +257,8 @@ func TestDispatchInvokeVerbatimForward(t *testing.T) {
 	}
 	// without content: wrapped via textResult with isError:false.
 	fb4 := &fakeBackend{postVals: map[string]any{"/servers/s/tools/c": map[string]any{"tools": []any{}}}}
-	res, err = dispatchNative(fb4.get, fb4.post, "invoke_command",
-		map[string]any{"server": "s", "command_name": "c"})
+	res, err = dispatchNative(fb4.get, fb4.post, "call",
+		map[string]any{"server": "s", "tool": "c"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,8 +269,8 @@ func TestDispatchInvokeVerbatimForward(t *testing.T) {
 
 	// content-present incl textResult shape is NOT re-wrapped: content key wins.
 	fb5 := &fakeBackend{postVals: map[string]any{"/servers/s/tools/c": map[string]any{"content": "just-a-string"}}}
-	res, err = dispatchNative(fb5.get, fb5.post, "invoke_command",
-		map[string]any{"server": "s", "command_name": "c"})
+	res, err = dispatchNative(fb5.get, fb5.post, "call",
+		map[string]any{"server": "s", "tool": "c"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,8 +283,8 @@ func TestDispatchAuthHintCurrent(t *testing.T) {
 	// current behavior lives in runShim's post closure (401 hint extraction);
 	// dispatchNative itself just forwards errors. Pin that a 401-shaped error passes through.
 	fb := &fakeBackend{postErr: map[string]error{"/servers/s/tools/c": fmt.Errorf(`map[auth_required:run: oxyp login s error:denied]`)}}
-	_, err := dispatchNative(fb.get, fb.post, "invoke_command",
-		map[string]any{"server": "s", "command_name": "c"})
+	_, err := dispatchNative(fb.get, fb.post, "call",
+		map[string]any{"server": "s", "tool": "c"})
 	if err == nil {
 		t.Fatal("must surface post error")
 	}
@@ -335,16 +335,16 @@ func TestMetaToolsInvariants(t *testing.T) {
 		}
 		names[name] = tool
 	}
-	for _, want := range []string{"list_servers", "list_commands", "describe_commands", "invoke_command", "search_tools"} {
+	for _, want := range []string{"list_servers", "list_tools", "describe_tool", "call", "search_tools"} {
 		if _, ok := names[want]; !ok {
 			t.Errorf("missing tool %q", want)
 		}
 	}
 	required := map[string][]string{
-		"list_commands":     {"server"},
-		"describe_commands": {"server", "command_names"},
-		"invoke_command":    {"server", "command_name"},
-		"search_tools":      {"query"},
+		"list_tools":    {"server"},
+		"describe_tool": {"server", "tools"},
+		"call":          {"server", "tool"},
+		"search_tools":  {"query"},
 	}
 	for tool, want := range required {
 		schema, _ := names[tool]["inputSchema"].(map[string]any)

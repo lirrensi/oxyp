@@ -44,27 +44,27 @@ var metaTools = []map[string]any{
 		}},
 	},
 	{
-		"name":        "list_commands",
+		"name":        "list_tools",
 		"description": "Thin tool list (name+description) for a server.",
 		"inputSchema": map[string]any{"type": "object", "required": []string{"server"}, "properties": map[string]any{
 			"server": map[string]any{"type": "string"},
 		}},
 	},
 	{
-		"name":        "describe_commands",
+		"name":        "describe_tool",
 		"description": "Full schemas for named tools on a server.",
-		"inputSchema": map[string]any{"type": "object", "required": []string{"server", "command_names"}, "properties": map[string]any{
-			"server":        map[string]any{"type": "string"},
-			"command_names": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"inputSchema": map[string]any{"type": "object", "required": []string{"server", "tools"}, "properties": map[string]any{
+			"server": map[string]any{"type": "string"},
+			"tools":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		}},
 	},
 	{
-		"name":        "invoke_command",
+		"name":        "call",
 		"description": "Call a downstream tool. Args nest under parameters.",
-		"inputSchema": map[string]any{"type": "object", "required": []string{"server", "command_name"}, "properties": map[string]any{
-			"server":       map[string]any{"type": "string"},
-			"command_name": map[string]any{"type": "string"},
-			"parameters":   map[string]any{"type": "object"},
+		"inputSchema": map[string]any{"type": "object", "required": []string{"server", "tool"}, "properties": map[string]any{
+			"server":     map[string]any{"type": "string"},
+			"tool":       map[string]any{"type": "string"},
+			"parameters": map[string]any{"type": "object"},
 		}},
 	},
 	{
@@ -209,7 +209,7 @@ func textResult(v any) map[string]any {
 }
 
 // dispatchNative routes a meta-tool call. Discovery tools return our JSON as
-// text; invoke_command forwards the downstream content blocks VERBATIM —
+// text; call forwards the downstream content blocks VERBATIM —
 // image/audio/resource blocks ride natively so clients can render them or
 // pass them to the model. No decode, no re-encode, no text wrap.
 func dispatchNative(
@@ -257,7 +257,7 @@ func dispatchNative(
 			return nil, err
 		}
 		return textResult(v), nil
-	case "list_commands":
+	case "list_tools":
 		srv := str("server")
 		if srv == "" {
 			return nil, fmt.Errorf("server required")
@@ -267,13 +267,13 @@ func dispatchNative(
 			return nil, err
 		}
 		return textResult(v), nil
-	case "describe_commands":
+	case "describe_tool":
 		srv := str("server")
 		if srv == "" {
 			return nil, fmt.Errorf("server required")
 		}
 		var out []any
-		if names, ok := args["command_names"].([]any); ok {
+		if names, ok := args["tools"].([]any); ok {
 			for _, n := range names {
 				ns, _ := n.(string)
 				if ns == "" {
@@ -287,10 +287,10 @@ func dispatchNative(
 			}
 		}
 		return textResult(map[string]any{"schemas": out}), nil
-	case "invoke_command":
-		srv, cmd := str("server"), str("command_name")
+	case "call":
+		srv, cmd := str("server"), str("tool")
 		if srv == "" || cmd == "" {
-			return nil, fmt.Errorf("server and command_name required")
+			return nil, fmt.Errorf("server and tool required")
 		}
 		params, _ := args["parameters"].(map[string]any)
 		if params == nil {

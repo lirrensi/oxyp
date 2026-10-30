@@ -18,10 +18,10 @@ Point your client at oxyp instead of at N servers. Your agent sees exactly this,
 | Tool | Does |
 | ---- | ---- |
 | `list_servers` | what's connected, what's healthy |
-| `list_commands` | thin tool list for one server |
+| `list_tools` | thin tool list for one server |
 | `search_tools` | ranked search across **all** servers by words |
-| `describe_commands` | full schema for one tool, on demand |
-| `invoke_command` | run it |
+| `describe_tool` | full schemas for named tools, on demand |
+| `call` | run it |
 
 Context stays flat whether you have 2 servers or 30: schemas load only for the tool about to be called. Connections stay cold until first use, idle children stop themselves, and tool metadata lives on disk — search works even with everything asleep.
 
@@ -150,7 +150,7 @@ Install oxyp (lazy MCP gateway) and connect it:
 6. Verify: oxyp search "<a word>" and oxyp status
 
 Rules for using oxyp afterwards: you only ever see 5 tools.
-To use any downstream tool: search_tools → describe_commands → invoke_command.
+To use any downstream tool: search_tools → describe_tool → call.
 Never guess schemas — describe first.
 ```
 

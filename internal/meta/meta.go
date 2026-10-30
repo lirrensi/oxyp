@@ -1,9 +1,9 @@
-// Package meta exposes the lazy-mcp meta-tools as plain HTTP handlers:
+// Package meta exposes the oxyp meta-tools as plain HTTP handlers:
 //
 //	GET  /servers                    list_servers (?filter=)
-//	GET  /servers/{name}/tools        list_commands (thin: name+description)
-//	GET  /servers/{name}/tools/{tool} describe_commands (full schema)
-//	POST /servers/{name}/tools/{tool} invoke_command ({parameters})
+//	GET  /servers/{name}/tools        list_tools (thin: name+description)
+//	GET  /servers/{name}/tools/{tool} describe_tool (full schema)
+//	POST /servers/{name}/tools/{tool} call ({parameters})
 //	GET  /servers/{name}/resources    list downstream resources (+instructions)
 //	GET  /servers/{name}/resources/{uri...} read one resource (?uri= also works)
 //	GET  /servers/{name}/prompts      list downstream prompt templates

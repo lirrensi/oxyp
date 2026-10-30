@@ -97,8 +97,8 @@ Dir precedence: --dir > OXYP_DIR > XDG_CONFIG_HOME/oxyp > ~/.oxyp
 - Timeouts: initialize 30 s, per-RPC 10 s, health ping 3 s every 10 s,
   idle sweep every 30 s with 10 min default, remote metadata TTL 5 min,
   CLI API 60 s, autostart wait 5 s, doctor/add live probe 15 s per server.
-- The shim exposes exactly **5** meta-tools (`list_servers`, `list_commands`,
-  `describe_commands`, `invoke_command`, `search_tools`).
+- The shim exposes exactly **5** meta-tools (`list_servers`, `list_tools`,
+  `describe_tool`, `call`, `search_tools`).
 - Redirects: up to **4** redirects followed (5 requests total); cross-origin
   keeps only `Accept`, `Content-Type`, `Mcp-Session-Id`,
   `MCP-Protocol-Version`.

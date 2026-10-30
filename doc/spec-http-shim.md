@@ -154,13 +154,13 @@ bearer when set). All errors use code `-32000`.
 **I want** the strictest-common-denominator server
 **So that** one `{command: [oxyp, shim]}` line works everywhere.
 
-The five tools: `list_servers` (optional `filter`), `list_commands`
-(`server` required), `describe_commands` (`server` + `command_names[]`;
+The five tools: `list_servers` (optional `filter`), `list_tools`
+(`server` required), `describe_tool` (`server` + `tools[]`;
 skips empty/non-strings; N sequential GETs, first failure aborts),
-`invoke_command` (`server` + `command_name`, `parameters` non-map ⇒ `{}`),
+`call` (`server` + `tool`, `parameters` non-map ⇒ `{}`),
 `search_tools` (`query` required non-empty; optional `server`/`regex`/
 `limit`/`offset`, non-positive numbers ignored). Discovery results are
-JSON-in-text; only `invoke_command` preserves `structuredContent`/`_meta`.
+JSON-in-text; only `call` preserves `structuredContent`/`_meta`.
 POST failures render `"<error> (<auth_required>)"`; GET failures embed the
 raw daemon body. Path segments are `PathEscape`d; queries use
 `url.Values`. The shim itself writes nothing to stderr (daemon drains
@@ -178,7 +178,7 @@ Verification: `V-HTTP-004`, `V-ZOO-005` (shim manual matrix — gap).
 
 ### Requirement: Media passthrough
 
-`invoke_command` MUST forward the daemon's `{content, isError,
+`call` MUST forward the daemon's `{content, isError,
 structuredContent?, _meta?}` structurally unchanged: the output guard
 rewrites ONLY `mcp.TextContent`; image/audio/resource blocks pass through
 untouched (never textified), so vision-capable clients get real media.
