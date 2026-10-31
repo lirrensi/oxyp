@@ -26,9 +26,9 @@ check, and the gaps we admit.
 
 ## System surfaces
 
-- Backend/API: daemon HTTP (10 routes + gate), lifecycle/reload/sweep,
+- Backend/API: daemon HTTP (11 routes + gate), lifecycle/reload/sweep,
   metacache, search, perms, guard/spill, trace, redact, remhttp, OAuth.
-- Workers/CLI: 13 Cobra commands, stdio shim JSON-RPC, connectors.
+- Workers/CLI: 16 Cobra commands, stdio shim JSON-RPC, connectors.
 - Data: `<dir>/oxyp.toml`, `<dir>/daemon.json`, `<dir>/cache.json`,
   `<dir>/oauth/`, `<dir>/trace.jsonl`, `/tmp/oxyp-output-*.txt`.
 - Integrations: downstream stdio (any language), Streamable HTTP, legacy
@@ -89,7 +89,14 @@ check, and the gaps we admit.
 | Regex mode + 400 on bad pattern | V-DISC-004 | unit/contract | `go test ./internal/search/ ./internal/meta/` | local | search + meta tests | verified |
 | Pagination contract incl. past-end quirk | V-DISC-005 | unit | `go test ./internal/search/ -run Page` | local | page tests | verified |
 | Deny-wins, invisible+blocked, allow-all default | V-DISC-006 | unit/contract | `go test ./internal/perms/ ./internal/meta/` | local | perms + C1 tests | verified (mutation: deny removal caught) |
-| OAuth 4-flow battery vs fake IdP | V-OAUTH-001 | zoo | `go test ./zoo/ -run OAuth` + `internal/oauth` | local | ZOO OAuth 3/3 | partial (zoo IdP ignores client_id/PKCE — gap) |
+| Pin/hide freeze + drift notes | V-DISC-007 | component | `go test ./internal/daemon/ -run 'Pin\|Hide\|Intersect'` + live doctor | local | `gates_test.go` + live smoke | verified (this session: pin skips disk, hide intersects, doctor drift) |
+| Params allowlist + 403 envelope | V-DISC-008 | unit/contract | `go test ./internal/daemon/ -run CheckParams` + `internal/meta` 403 shape | local | `gates_test.go` + live `call` 403 | verified (this session) |
+| Groups narrow + fail-closed unknown | V-DISC-009 | component | `go test ./internal/daemon/ -run Group` + live `servers/call/search --group` | local | `gates_test.go` + live smoke | verified (this session) |
+| /mcp gateway 5 tools + gates | V-HTTP-006 | integration | Go client vs `POST /mcp` (initialize→call) + live smoke | local | throwaway `mcpsmoke_test.go` (5 tools, cold search, live call) | verified (this session; throwaway removed) |
+| OAuth discovery URL overrides | V-OAUTH-008 | unit | device/CC discovery with override URL | local | code path (variadic override) | partial (no live broken-discovery IdP — gap) |
+| New knobs validation matrix | V-GUARD-008 | unit | `go test ./internal/config/ -run Validate` | local | `validate_test.go` (14 new cases) | verified |
+| Passthrough precedence | V-DISC-010 | unit | `go test ./internal/daemon/ -run Passthrough` | local | `gates_test.go` | verified |
+| Refresh replaces pin/hide baseline, pin survives push | V-DISC-011 | component | `go test ./internal/daemon/ -run 'Refresh|PinSurvives'` | local | `gates_test.go` | verified (this session: force-store under pin/hide, failure keeps baseline, pinned disk survives push) |
 | Browser + `--complete` cross-process | V-OAUTH-002 | integration | `go test ./internal/oauth/ ./internal/daemon/ -run 'Browser|Complete|Pending'` | local | callback/pending/reg tests | verified |
 | Device RFC 8628 poll/approve | V-OAUTH-003 | zoo/integration | zoo device test + `device_test.go` | local | ZOO device row | verified |
 | Token verify ok/expired | V-OAUTH-004 | integration | `go test ./internal/daemon/ -run Token` | local | flows tests | verified |
@@ -108,7 +115,7 @@ check, and the gaps we admit.
 | Expansion per-field + fail-closed | V-GUARD-005 | unit | `go test ./internal/config/ -run Expand` | local | expand edge tests | verified (mutation: exclusivity caught) |
 | cwd/inherit_env/env | V-GUARD-006 | component | `go test ./internal/daemon/ ./internal/config/` | local | spawn-env tests | verified |
 | Config schema: exclusive url/command, loopback-token rule | V-GUARD-007 | unit | `go test ./internal/config/ -run Validate` | local | validate tests | verified (mutation caught) |
-| 13 commands + autostart | V-CLI-001 | component | `go test ./cmd/oxyp/ -run 'TestMain|Shim'` | local | `main_test.go` (16 funcs) | verified |
+| 16 commands (incl. refresh) + autostart | V-CLI-001 | component | `go test ./cmd/oxyp/ -run 'TestMain\|Shim'` | local | `main_test.go` (16 funcs) | verified |
 | Doctor offline/live, 15 s, exit codes | V-CLI-002 | component | `go test ./cmd/oxyp/ -run Doctor` | local | `doctor_test.go` (12) | verified |
 | Add probe/preview/append | V-CLI-003 | component | `go test ./cmd/oxyp/ -run Add` | local | `add_test.go` (13) | verified |
 | Import shapes/translation/render | V-CLI-004 | unit/component | `go test ./internal/importcfg/ ./cmd/oxyp/ -run Import` | local | parse/translate/render/roundtrip + import tests | verified (mutation: null-command caught) |

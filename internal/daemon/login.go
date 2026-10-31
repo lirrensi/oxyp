@@ -322,7 +322,11 @@ func (d *Daemon) loginDevice(ctx context.Context, m *managed) error {
 	cfg := m.getCfg()
 	httpClient := remhttpClient(d, m)
 	issuer := issuerOf(cfg.URL)
-	md, err := oauth.DiscoverDeviceMetadata(ctx, httpClient, issuer)
+	metaOverride := ""
+	if cfg.OAuth != nil {
+		metaOverride = cfg.OAuth.AuthorizationURL
+	}
+	md, err := oauth.DiscoverDeviceMetadata(ctx, httpClient, issuer, metaOverride)
 	if err != nil {
 		return err
 	}
@@ -391,7 +395,11 @@ func (d *Daemon) loginClientCredentials(ctx context.Context, m *managed) error {
 		return fmt.Errorf("client_credentials needs oauth.client_id and oauth.client_secret")
 	}
 	httpClient := remhttpClient(d, m)
-	md, err := oauth.DiscoverClientCredentialsMetadata(ctx, httpClient, issuerOf(cfg.URL))
+	metaOverride := ""
+	if cfg.OAuth != nil {
+		metaOverride = cfg.OAuth.AuthorizationURL
+	}
+	md, err := oauth.DiscoverClientCredentialsMetadata(ctx, httpClient, issuerOf(cfg.URL), metaOverride)
 	if err != nil {
 		return err
 	}

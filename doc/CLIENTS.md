@@ -16,10 +16,12 @@ oxyp gives every client the same two doors:
 - stdio: `command: ["oxyp", "shim"]` (hermes/omp/opencode-local shape) — no PATH
   dependency beyond `oxyp` on PATH; absolute path safest (all three spawn
   without a login shell).
-- remote: `url: http://127.0.0.1:8379` — **NOT MCP**. oxyp's HTTP is its own
-  REST (meta-tools), not Streamable HTTP. Remote MCP clients canNOT point at
-  it directly. Document: remote MCP stays stdio-shim-over-ssh or future
-  Streamable HTTP mode.
+- Streamable HTTP: `url: http://127.0.0.1:8379/mcp` — the same 5 meta-tools
+  over MCP (URL-only clients, ChatGPT-style connectors, `curl`). Same
+  deny/param/group gates, same cold semantics; bearer + `Origin` checks apply.
+  Remote over LAN needs `daemon.token` (or `ssh -L` forward).
+- oxyp's own REST (`/servers`, `/tools`, …) stays for the CLI/shim; MCP
+  clients use the shim or `/mcp`, never the REST paths directly.
 
 ## Transports in the wild (what downstream servers speak)
 

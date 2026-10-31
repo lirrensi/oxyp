@@ -67,6 +67,19 @@ func TestValidateServerBranchMatrix(t *testing.T) {
 		{"negTrace", ServerEntry{Name: "s", URL: "https://x/mcp", Trace: &TraceConfig{MaxEvents: -1}}, `server "s": trace limits must be >= 0`},
 		{"negTraceBytes", ServerEntry{Name: "s", URL: "https://x/mcp", Trace: &TraceConfig{MaxBytes: -9}}, `server "s": trace limits must be >= 0`},
 		{"remoteLifecycleAcceptedCurrent", ServerEntry{Name: "s", URL: "https://x/mcp", Lifecycle: "eager"}, ""}, // current behavior: remote lifecycle/idle accepted though sweep is local-only
+		{"newToolsBogus", ServerEntry{Name: "s", Command: []string{"x"}, NewTools: "sometimes"}, `server "s": new_tools must be expose|hide or empty`},
+		{"newToolsHide", ServerEntry{Name: "s", Command: []string{"x"}, NewTools: "hide"}, ""},
+		{"newToolsExpose", ServerEntry{Name: "s", Command: []string{"x"}, NewTools: "expose"}, ""},
+		{"negToolTimeout", ServerEntry{Name: "s", URL: "https://x/mcp", ToolTimeout: new(-5)}, `server "s": tool_timeout must be >= 0`},
+		{"toolTimeoutOK", ServerEntry{Name: "s", URL: "https://x/mcp", ToolTimeout: new(60)}, ""},
+		{"tokenHeaderCRLF", ServerEntry{Name: "s", URL: "https://x/mcp", TokenHeader: "X-A\npi"}, `server "s": bad token_header "X-A\npi"`},
+		{"tokenHeaderOK", ServerEntry{Name: "s", URL: "https://x/mcp", TokenHeader: "X-Api-Key"}, ""},
+		{"paramsEmptyTool", ServerEntry{Name: "s", Command: []string{"x"}, Params: map[string][]string{"": {"a"}}}, `server "s": params has empty tool name`},
+		{"paramsEmptyParam", ServerEntry{Name: "s", Command: []string{"x"}, Params: map[string][]string{"t": {"a", ""}}}, `server "s": params.t[1] must not be empty`},
+		{"paramsOK", ServerEntry{Name: "s", Command: []string{"x"}, Params: map[string][]string{"t": {"a"}}}, ""},
+		{"passthroughEmpty", ServerEntry{Name: "s", URL: "https://x/mcp", PassthroughHeaders: []string{""}}, `server "s": passthrough_headers[0] must not be empty`},
+		{"passthroughLocal", ServerEntry{Name: "s", Command: []string{"x"}, PassthroughHeaders: []string{"X-T"}}, `server "s": passthrough_headers is remote-only`},
+		{"passthroughOK", ServerEntry{Name: "s", URL: "https://x/mcp", PassthroughHeaders: []string{"X-T"}}, ""},
 		{"localHappy", ServerEntry{Name: "s", Command: []string{"true"}}, ""},
 		{"remoteHappy", ServerEntry{Name: "s", URL: "https://x/mcp"}, ""},
 	} {
@@ -96,7 +109,7 @@ func TestValidateDaemonMatrix(t *testing.T) {
 		{"lan", DaemonConfig{Addr: "192.168.1.5:8379"}, "daemon.token is required for non-loopback addr"},
 		{"unparseable", DaemonConfig{Addr: "not-an-addr"}, "daemon.token is required for non-loopback addr"},
 		{"schemePrefixFailsClosedCurrent", DaemonConfig{Addr: "http://127.0.0.1:8379"}, "daemon.token is required for non-loopback addr"}, // current behavior: SplitHostPort host becomes "http"
-		{"portNamePassesLoopbackCheck", DaemonConfig{Addr: "127.0.0.1:notaport"}, ""},                                                   // current behavior: syntax never validated
+		{"portNamePassesLoopbackCheck", DaemonConfig{Addr: "127.0.0.1:notaport"}, ""},                                                     // current behavior: syntax never validated
 		{"emptyString", DaemonConfig{Addr: ""}, ""},
 		{"tokenSatisfies", DaemonConfig{Addr: "0.0.0.0:8379", Token: "x"}, ""},
 		{"whitespaceTokenSatisfiesCurrent", DaemonConfig{Addr: "0.0.0.0:1", Token: " "}, ""}, // current behavior: not trimmed

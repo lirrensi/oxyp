@@ -57,22 +57,24 @@ server mode exists (future work).
 ## System map
 
 ```
-MCP clients (hermes / omp / opencode)
-  │  stdio JSON-RPC: initialize / tools/list / tools/call / ping
+MCP clients (hermes / omp / opencode) — URL-only clients via POST /mcp
+  │  stdio JSON-RPC (shim) or Streamable HTTP (/mcp): initialize / tools/list / tools/call / ping
   ▼
 oxyp shim (cmd/oxyp/shim.go) — 5 static meta-tools, stdout pure JSONL
-  │  HTTP + bearer (60 s client), autostarts daemon if needed
+  │  HTTP + bearer (60 s client), autostarts daemon if needed; --group / OXYP_GROUP scopes
   ▼
-daemon HTTP API (internal/meta) — 10 routes + auth gate
+daemon HTTP API (internal/meta) — 11 routes + auth gate
   │  bearer → Host → Origin → Content-Type
+  │  POST /mcp = same 5 meta-tools over Streamable HTTP (internal/meta/mcp.go)
   ▼
-Daemon (internal/daemon) — lifecycle, spawn, health, cache, OAuth, probe
-  ├── local stdio children (mcp-go, 30 s init / 10 s RPC / 3 s ping)
-  ├── remote Streamable HTTP + legacy SSE fallback (remhttp client)
-  ├── metacache (<dir>/cache.json) — tool metadata, fingerprint-keyed
-  ├── OAuth store (<dir>/oauth/) — daemon-held tokens + DCR sidecar
+Daemon (internal/daemon) — lifecycle, spawn, health, cache, OAuth, probe, groups
+  ├── local stdio children (mcp-go, 30 s init / 10 s RPC / 3 s ping; per-server tool_timeout)
+  ├── remote Streamable HTTP + legacy SSE fallback (remhttp client; token_header remap)
+  ├── metacache (<dir>/cache.json) — tool metadata, fingerprint-keyed; pinned / new_tools=hide
+  ├── OAuth store (<dir>/oauth/) — daemon-held tokens + DCR sidecar; authorization_url override
+  ├── params gates ([servers.x.params] → 403 param-blocked)
   └── spill files (os.TempDir()/oxyp-output-*.txt, 0600, pruned)
-Config: <dir>/oxyp.toml + <dir>/connectors/  Endpoint: <dir>/daemon.json
+Config: <dir>/oxyp.toml (+ [groups.*]) + <dir>/connectors/  Endpoint: <dir>/daemon.json
 Dir precedence: --dir > OXYP_DIR > XDG_CONFIG_HOME/oxyp > ~/.oxyp
 ```
 
@@ -85,7 +87,7 @@ Dir precedence: --dir > OXYP_DIR > XDG_CONFIG_HOME/oxyp > ~/.oxyp
 | Daemon-held OAuth (4 flows), DCR sidecar, auto-detect | `internal/oauth`, `internal/daemon/login.go` | [/spec-oauth.md](/spec-oauth.md) |
 | HTTP API, CSRF/token policy, shim, media passthrough | `internal/meta`, `cmd/oxyp/shim.go` | [/spec-http-shim.md](/spec-http-shim.md) |
 | Output guard/spill, trace, redaction, HTTP transport, secret expansion, config schema | `internal/outguard`, `internal/ptrace`, `internal/redact`, `internal/remhttp`, `internal/config` | [/spec-guard.md](/spec-guard.md) |
-| CLI (13 commands), doctor, add, import, connectors | `cmd/oxyp`, `internal/importcfg` | [/spec-cli.md](/spec-cli.md) |
+| CLI (16 commands), doctor, add, import, connectors | `cmd/oxyp`, `internal/importcfg` | [/spec-cli.md](/spec-cli.md) |
 | Compat batteries (stdio/HTTP/OAuth/TLS zoo servers) | `zoo/` | [/ZOO.md](/ZOO.md), [/verification/strategy.md](/verification/strategy.md) |
 | Client attach shapes (opencode/omp/hermes) | — (docs) | [/CLIENTS.md](/CLIENTS.md) |
 | Stances (secrets, portability, no approval prompts) | — (docs) | [/PHILOSOPHY.md](/PHILOSOPHY.md) |
@@ -94,11 +96,12 @@ Dir precedence: --dir > OXYP_DIR > XDG_CONFIG_HOME/oxyp > ~/.oxyp
 
 - Default bind `127.0.0.1:8379`; empty token means loopback trust ONLY —
   a non-loopback addr with an empty token fails `config.Load`.
-- Timeouts: initialize 30 s, per-RPC 10 s, health ping 3 s every 10 s,
-  idle sweep every 30 s with 10 min default, remote metadata TTL 5 min,
-  CLI API 60 s, autostart wait 5 s, doctor/add live probe 15 s per server.
-- The shim exposes exactly **5** meta-tools (`list_servers`, `list_tools`,
-  `describe_tool`, `call`, `search_tools`).
+- Timeouts: initialize 30 s, per-RPC 10 s (per-server `tool_timeout` overrides),
+  health ping 3 s every 10 s, idle sweep every 30 s with 10 min default,
+  remote metadata TTL 5 min, CLI API 60 s, autostart wait 5 s, doctor/add live
+  probe 15 s per server.
+- The shim AND `POST /mcp` expose exactly **5** meta-tools (`list_servers`,
+  `list_tools`, `describe_tool`, `call`, `search_tools`).
 - Redirects: up to **4** redirects followed (5 requests total); cross-origin
   keeps only `Accept`, `Content-Type`, `Mcp-Session-Id`,
   `MCP-Protocol-Version`.

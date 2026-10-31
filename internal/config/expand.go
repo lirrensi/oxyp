@@ -62,6 +62,8 @@ func expandServerSecrets(s *ServerEntry) string {
 		for k, v := range map[string]string{
 			"client_id": s.OAuth.ClientID, "client_secret": s.OAuth.ClientSecret,
 			"scope": s.OAuth.Scope, "redirect_uri": s.OAuth.RedirectURI,
+			"authorization_url": s.OAuth.AuthorizationURL, "token_url": s.OAuth.TokenURL,
+			"registration_url": s.OAuth.RegistrationURL,
 		} {
 			if v == "" {
 				continue
@@ -82,6 +84,12 @@ func expandServerSecrets(s *ServerEntry) string {
 				s.OAuth.Scope = ev
 			case "redirect_uri":
 				s.OAuth.RedirectURI = ev
+			case "authorization_url":
+				s.OAuth.AuthorizationURL = ev
+			case "token_url":
+				s.OAuth.TokenURL = ev
+			case "registration_url":
+				s.OAuth.RegistrationURL = ev
 			}
 		}
 	}

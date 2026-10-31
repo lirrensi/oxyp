@@ -6,13 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/lirrensi/oxyp/internal/config"
 	"github.com/lirrensi/oxyp/internal/daemon"
+	"github.com/lirrensi/oxyp/internal/metacache"
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
 // liveBudget is the per-server probe budget for doctor --live (adapter parity).
@@ -74,8 +78,37 @@ func runDoctorOffline(cfg *config.Config, asJSON bool) error {
 			results = append(results, doctorResult{Name: name, Status: "ok", Detail: doctorKind(e)})
 		}
 	}
+	for _, g := range sortedGroups(cfg) {
+		missing := groupMissing(cfg, g)
+		if len(missing) == 0 {
+			continue
+		}
+		for _, m := range missing {
+			results = append(results, doctorResult{Name: "group:" + g, Status: "failed", Detail: "member " + m + " not found (skipped)"})
+		}
+	}
 	printDoctor(results, false, asJSON)
 	return doctorExit(results)
+}
+
+func sortedGroups(cfg *config.Config) []string {
+	out := make([]string, 0, len(cfg.Groups))
+	for n := range cfg.Groups {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// groupMissing lists members with no matching server entry.
+func groupMissing(cfg *config.Config, group string) []string {
+	var out []string
+	for _, m := range cfg.Groups[group].Servers {
+		if _, ok := cfg.Servers[m]; !ok {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func doctorKind(e config.ServerEntry) string {
@@ -83,6 +116,71 @@ func doctorKind(e config.ServerEntry) string {
 		return "remote " + e.URL
 	}
 	return fmt.Sprintf("local %q", e.Command)
+}
+
+// driftNote compares live tools against the disk snapshot for pin/hide
+// servers: added/removed/changed names. Empty when clean or not applicable.
+// Best-effort: cache errors yield no note (the live probe already succeeded).
+func driftNote(dir string, e config.ServerEntry, live []mcp.Tool) string {
+	if !e.Pinned && e.NewTools != "hide" {
+		return ""
+	}
+	cached, ok := readCachedTools(dir, e)
+	if !ok {
+		return " (no cache baseline)"
+	}
+	have := map[string]bool{}
+	for _, t := range cached {
+		have[strings.ToLower(t)] = true
+	}
+	var added []string
+	seen := map[string]bool{}
+	for _, t := range live {
+		n := strings.ToLower(t.Name)
+		seen[n] = true
+		if !have[n] {
+			added = append(added, t.Name)
+		}
+	}
+	var removed []string
+	for _, t := range cached {
+		if !seen[strings.ToLower(t)] {
+			removed = append(removed, t)
+		}
+	}
+	if len(added) == 0 && len(removed) == 0 {
+		return ""
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	note := " drift:"
+	if len(added) > 0 {
+		note += " added=[" + strings.Join(added, ",") + "]"
+	}
+	if len(removed) > 0 {
+		note += " removed=[" + strings.Join(removed, ",") + "]"
+	}
+	if e.Pinned {
+		note += " (pinned: serving cache)"
+	} else {
+		note += " (hidden by new_tools=hide)"
+	}
+	return note
+}
+
+// readCachedTools loads tool names from cache.json for one entry.
+// False when missing/corrupt/fingerprint-mismatch (no baseline to diff).
+func readCachedTools(dir string, e config.ServerEntry) ([]string, bool) {
+	c := metacache.New(filepath.Join(dir, "cache.json"))
+	tools, ok := c.Get(e.Name, metacache.Fingerprint(e))
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, t.Name)
+	}
+	return out, true
 }
 
 // runDoctorLive connects EVERY configured server independently with a 15s
@@ -123,7 +221,8 @@ func runDoctorLive(dir string, cfg *config.Config, asJSON bool) error {
 			results = append(results, doctorResult{Name: name, Status: "failed", Detail: err.Error()})
 			continue
 		}
-		results = append(results, doctorResult{Name: name, Status: "ok", Tools: len(tools), Detail: doctorKind(e)})
+		detail := doctorKind(e) + driftNote(dir, e, tools)
+		results = append(results, doctorResult{Name: name, Status: "ok", Tools: len(tools), Detail: detail})
 	}
 	printDoctor(results, true, asJSON)
 	return doctorExit(results)

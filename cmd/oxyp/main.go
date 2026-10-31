@@ -44,7 +44,7 @@ var (
 func main() {
 	root := &cobra.Command{Use: "oxyp", Short: "one daemon, every connector"}
 	root.PersistentFlags().StringVar(&dirFlag, "dir", "", "config dir (default OXYP_DIR, XDG_CONFIG_HOME/oxyp, or ~/.oxyp)")
-	root.AddCommand(daemonCmd(), callCmd(), serversCmd(), toolsCmd(), searchCmd(), describeCmd(), statusCmd(), reloadCmd(), stopCmd(), restartCmd(), shimCmd(), loginCmd(), doctorCmd(), addCmd(), importCmd())
+	root.AddCommand(daemonCmd(), callCmd(), serversCmd(), toolsCmd(), searchCmd(), describeCmd(), statusCmd(), reloadCmd(), refreshCmd(), stopCmd(), restartCmd(), shimCmd(), loginCmd(), doctorCmd(), addCmd(), importCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -490,7 +490,8 @@ func printJSON(b []byte) {
 // --- CLI commands ---
 
 func callCmd() *cobra.Command {
-	return &cobra.Command{
+	var group string
+	c := &cobra.Command{
 		Use:   "call <server> <tool> [json-args]",
 		Short: "invoke a tool via the daemon (autostarts it)",
 		Args:  cobra.RangeArgs(2, 3),
@@ -501,9 +502,11 @@ func callCmd() *cobra.Command {
 					return fmt.Errorf("bad json args: %w", err)
 				}
 			}
-			b, code, err := apiCall("POST",
-				fmt.Sprintf("/servers/%s/tools/%s", url.PathEscape(args[0]), url.PathEscape(args[1])),
-				map[string]any{"parameters": params})
+			path := fmt.Sprintf("/servers/%s/tools/%s", url.PathEscape(args[0]), url.PathEscape(args[1]))
+			if g := cliGroup(group); g != "" {
+				path += "?group=" + url.QueryEscape(g)
+			}
+			b, code, err := apiCall("POST", path, map[string]any{"parameters": params})
 			if err != nil {
 				return err
 			}
@@ -514,17 +517,26 @@ func callCmd() *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().StringVar(&group, "group", "", "curated subset ([groups.*]); OXYP_GROUP also works")
+	return c
 }
 
 func serversCmd() *cobra.Command {
-	var filter string
+	var filter, group string
 	c := &cobra.Command{
 		Use:   "servers",
 		Short: "list servers",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			path := "/servers"
+			vals := url.Values{}
 			if filter != "" {
-				path += "?filter=" + url.QueryEscape(filter)
+				vals.Set("filter", filter)
+			}
+			if g := cliGroup(group); g != "" {
+				vals.Set("group", g)
+			}
+			path := "/servers"
+			if len(vals) > 0 {
+				path += "?" + vals.Encode()
 			}
 			b, code, err := apiCall("GET", path, nil)
 			if err != nil {
@@ -538,16 +550,22 @@ func serversCmd() *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&filter, "filter", "", "filter by name/description")
+	c.Flags().StringVar(&group, "group", "", "curated subset ([groups.*]); OXYP_GROUP also works")
 	return c
 }
 
 func toolsCmd() *cobra.Command {
-	return &cobra.Command{
+	var group string
+	c := &cobra.Command{
 		Use:   "tools <server>",
 		Short: "list tools (thin)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			b, code, err := apiCall("GET", "/servers/"+url.PathEscape(args[0])+"/tools", nil)
+			path := "/servers/" + url.PathEscape(args[0]) + "/tools"
+			if g := cliGroup(group); g != "" {
+				path += "?group=" + url.QueryEscape(g)
+			}
+			b, code, err := apiCall("GET", path, nil)
 			if err != nil {
 				return err
 			}
@@ -558,10 +576,12 @@ func toolsCmd() *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().StringVar(&group, "group", "", "curated subset ([groups.*]); OXYP_GROUP also works")
+	return c
 }
 
 func searchCmd() *cobra.Command {
-	var server string
+	var server, group string
 	var regex bool
 	var limit, offset int
 	c := &cobra.Command{
@@ -572,6 +592,9 @@ func searchCmd() *cobra.Command {
 			q := url.Values{"q": {args[0]}}
 			if server != "" {
 				q.Set("server", server)
+			}
+			if g := cliGroup(group); g != "" {
+				q.Set("group", g)
 			}
 			if regex {
 				q.Set("regex", "1")
@@ -594,19 +617,33 @@ func searchCmd() *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&server, "server", "", "restrict to one server")
+	c.Flags().StringVar(&group, "group", "", "curated subset ([groups.*]); OXYP_GROUP also works")
 	c.Flags().BoolVar(&regex, "regex", false, "query is a regex (unranked)")
 	c.Flags().IntVar(&limit, "limit", 12, "page size")
 	c.Flags().IntVar(&offset, "offset", 0, "page offset")
 	return c
 }
 
+// cliGroup resolves --group flag over OXYP_GROUP env.
+func cliGroup(flag string) string {
+	if flag != "" {
+		return flag
+	}
+	return os.Getenv("OXYP_GROUP")
+}
+
 func describeCmd() *cobra.Command {
-	return &cobra.Command{
+	var group string
+	c := &cobra.Command{
 		Use:   "describe <server> <tool>",
 		Short: "full tool schema",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
-			b, code, err := apiCall("GET", "/servers/"+url.PathEscape(args[0])+"/tools/"+url.PathEscape(args[1]), nil)
+			path := "/servers/" + url.PathEscape(args[0]) + "/tools/" + url.PathEscape(args[1])
+			if g := cliGroup(group); g != "" {
+				path += "?group=" + url.QueryEscape(g)
+			}
+			b, code, err := apiCall("GET", path, nil)
 			if err != nil {
 				return err
 			}
@@ -617,6 +654,8 @@ func describeCmd() *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().StringVar(&group, "group", "", "curated subset ([groups.*]); OXYP_GROUP also works")
+	return c
 }
 
 func statusCmd() *cobra.Command {
@@ -640,6 +679,30 @@ func reloadCmd() *cobra.Command {
 		Short: "re-read config (soft-fail per entry)",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			b, code, err := apiCall("POST", "/reload", nil)
+			if err != nil {
+				return err
+			}
+			printJSON(b)
+			if code >= 400 {
+				os.Exit(1)
+			}
+			return nil
+		},
+	}
+}
+
+func refreshCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "refresh <server>",
+		Short: "force live re-fetch and replace the tool snapshot (pinned/hide baseline)",
+		Long: `Force a live tools/list and store it as the new baseline — no hide-intersect,
+no pin skip. For opt-in freezes (pinned, new_tools=hide) this is the explicit
+"trust current upstream" button: freezing never self-heals, refreshing is on
+you. A failed fetch changes nothing; a successful one that returns fewer
+tools narrows the snapshot (fix upstream, refresh again).`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			b, code, err := apiCall("POST", "/servers/"+url.PathEscape(args[0])+"/refresh", nil)
 			if err != nil {
 				return err
 			}
@@ -732,13 +795,15 @@ func stopDaemon() (bool, error) {
 }
 
 func shimCmd() *cobra.Command {
-	return &cobra.Command{
+	c := &cobra.Command{
 		Use:   "shim",
 		Short: "stdio↔HTTP pipe for MCP clients (reads JSON-RPC on stdin)",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return runShim()
 		},
 	}
+	c.Flags().StringVar(&shimGroup, "group", "", "curated server subset ([groups.*]); OXYP_GROUP also works")
+	return c
 }
 
 func loginCmd() *cobra.Command {

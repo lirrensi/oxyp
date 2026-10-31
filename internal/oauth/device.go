@@ -43,8 +43,12 @@ type DeviceClient struct {
 }
 
 // DiscoverDeviceMetadata fetches RFC 8414 metadata and requires a device endpoint.
-func DiscoverDeviceMetadata(ctx context.Context, httpClient *http.Client, issuer string) (*DeviceMetadata, error) {
+// metadataURL overrides the well-known URL (broken discovery environments).
+func DiscoverDeviceMetadata(ctx context.Context, httpClient *http.Client, issuer string, metadataURL ...string) (*DeviceMetadata, error) {
 	wellKnown := strings.TrimSuffix(issuer, "/") + "/.well-known/oauth-authorization-server"
+	if len(metadataURL) > 0 && strings.TrimSpace(metadataURL[0]) != "" {
+		wellKnown = strings.TrimSpace(metadataURL[0])
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", wellKnown, nil)
 	if err != nil {
 		return nil, err
@@ -82,8 +86,8 @@ func RegisterDeviceClient(ctx context.Context, httpClient *http.Client, md *Devi
 		return nil, fmt.Errorf("server has no registration endpoint; configure oauth.client_id")
 	}
 	body, _ := json.Marshal(map[string]any{
-		"client_name": "oxyp",
-		"grant_types": []string{deviceGrant, "refresh_token"},
+		"client_name":    "oxyp",
+		"grant_types":    []string{deviceGrant, "refresh_token"},
 		"response_types": []string{},
 		// Match what we actually send: the issued secret goes out via
 		// client_secret_post (applyClientAuth). Registering "none" while

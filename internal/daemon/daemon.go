@@ -19,6 +19,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -139,6 +140,8 @@ type Daemon struct {
 	cache *metacache.Cache
 	// daemonCfg holds daemon-wide settings (idle default).
 	daemonCfg config.DaemonConfig
+	// groups holds curated server subsets ([groups.*]); guarded by mu.
+	groups map[string]config.GroupEntry
 	// tracer emits metadata-only protocol events (nil = off).
 	tracer *ptrace.Tracer
 	// spawnCtx is the daemon-lifetime context for downstream clients:
@@ -204,6 +207,10 @@ func NewWithDirs(cfg *config.Config, log *slog.Logger, oauthDir, cachePath strin
 		reqTO:     DefaultRequestTimeout,
 		oauthDir:  oauthDir,
 		daemonCfg: cfg.Daemon,
+		groups:    maps.Clone(cfg.Groups),
+	}
+	if d.groups == nil {
+		d.groups = map[string]config.GroupEntry{}
 	}
 	d.spawnCtx, d.spawnStop = context.WithCancel(context.Background())
 	if cachePath != "" {
@@ -251,6 +258,44 @@ func (d *Daemon) Entry(name string) *config.ServerEntry {
 	}
 	cfg := m.getCfg()
 	return &cfg
+}
+
+// GroupMembers returns the sorted enabled member names of a group.
+// Unknown group → nil, false. Missing or disabled members are skipped
+// (doctor reports them; the daemon stays quiet).
+func (d *Daemon) GroupMembers(group string) ([]string, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	g, ok := d.groups[group]
+	if !ok {
+		return nil, false
+	}
+	var out []string
+	for _, m := range g.Servers {
+		if _, ok := d.servers[m]; ok {
+			out = append(out, m)
+		}
+	}
+	sort.Strings(out)
+	return out, true
+}
+
+// InGroup reports whether server belongs to group. Empty group = all.
+// Unknown group = none (fail closed).
+func (d *Daemon) InGroup(group, server string) bool {
+	if group == "" {
+		return true
+	}
+	members, ok := d.GroupMembers(group)
+	if !ok {
+		return false
+	}
+	for _, m := range members {
+		if m == server {
+			return true
+		}
+	}
+	return false
 }
 
 // getCfg returns a deep copy of the managed config under m.mu.
@@ -586,11 +631,13 @@ func (d *Daemon) dialRemote(m *managed) (*client.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	headers := remappedHeaders(cfg)
 	if cfg.Transport == "sse" {
 		opts := []transport.ClientOption{
-			transport.WithHeaders(cfg.Headers),
+			transport.WithHeaders(headers),
 			transport.WithResponseTimeout(d.reqTO),
 			transport.WithHTTPClient(streamClient),
+			transport.WithHeaderFunc(passthroughFunc(cfg)),
 		}
 		if hasOAuth {
 			opts = append(opts, transport.WithOAuth(ocfg))
@@ -598,14 +645,108 @@ func (d *Daemon) dialRemote(m *managed) (*client.Client, error) {
 		return client.NewSSEMCPClient(cfg.URL, opts...)
 	}
 	opts := []transport.StreamableHTTPCOption{
-		transport.WithHTTPHeaders(cfg.Headers),
+		transport.WithHTTPHeaders(headers),
 		transport.WithHTTPTimeout(0),
 		transport.WithHTTPBasicClient(streamClient),
+		transport.WithHTTPHeaderFunc(passthroughFunc(cfg)),
 	}
 	if hasOAuth {
 		opts = append(opts, transport.WithHTTPOAuth(ocfg))
 	}
 	return client.NewStreamableHttpClient(cfg.URL, opts...)
+}
+
+// passthroughCtxKey carries whitelisted incoming headers for per-request
+// upstream forwarding. Set by the meta handler from the HTTP request;
+// read by passthroughFunc during the downstream call.
+type passthroughCtxKey struct{}
+
+// WithPassthrough returns ctx carrying upstream-bound headers. Only names in
+// allow (case-insensitive) are kept; values are capped at 8 KiB.
+func WithPassthrough(ctx context.Context, incoming http.Header, allow []string) context.Context {
+	if len(allow) == 0 {
+		return ctx
+	}
+	out := map[string]string{}
+	for _, name := range allow {
+		if v := strings.TrimSpace(incoming.Get(name)); v != "" {
+			if len(v) > 8192 {
+				v = v[:8192]
+			}
+			out[http.CanonicalHeaderKey(name)] = v
+		}
+	}
+	if len(out) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, passthroughCtxKey{}, out)
+}
+
+// passthroughFunc builds the per-request header injector for a server.
+// Config Headers win on conflict (explicit beats per-request); OAuth
+// Authorization is never overridden (mcp-go sets it after static headers;
+// this func runs last, so it skips Authorization entirely).
+func passthroughFunc(cfg config.ServerEntry) func(context.Context) map[string]string {
+	if len(cfg.PassthroughHeaders) == 0 {
+		return nil
+	}
+	allow := make(map[string]string, len(cfg.PassthroughHeaders))
+	for _, h := range cfg.PassthroughHeaders {
+		allow[strings.ToLower(h)] = http.CanonicalHeaderKey(h)
+	}
+	static := make(map[string]bool, len(cfg.Headers))
+	for k := range cfg.Headers {
+		static[strings.ToLower(k)] = true
+	}
+	return func(ctx context.Context) map[string]string {
+		extra, _ := ctx.Value(passthroughCtxKey{}).(map[string]string)
+		if len(extra) == 0 {
+			return nil
+		}
+		out := map[string]string{}
+		for canon, v := range extra {
+			lower := strings.ToLower(canon)
+			if lower == "authorization" || static[lower] {
+				continue
+			}
+			if _, ok := allow[lower]; ok {
+				out[canon] = v
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	}
+}
+
+// remappedHeaders applies token_header: a static Authorization header goes
+// out under the configured name instead (servers behind API gateways).
+// OAuth bearer tokens always use Authorization (mcp-go hardcoded).
+// Matching is case-insensitive on the header name; TokenHeader wins.
+func remappedHeaders(cfg config.ServerEntry) map[string]string {
+	if cfg.TokenHeader == "" || len(cfg.Headers) == 0 {
+		return cfg.Headers
+	}
+	var authVal string
+	found := false
+	for k, v := range cfg.Headers {
+		if strings.EqualFold(k, "authorization") {
+			authVal, found = v, true
+			break
+		}
+	}
+	if !found {
+		return cfg.Headers
+	}
+	out := make(map[string]string, len(cfg.Headers))
+	for k, v := range cfg.Headers {
+		if !strings.EqualFold(k, "authorization") {
+			out[k] = v
+		}
+	}
+	out[cfg.TokenHeader] = authVal
+	return out
 }
 
 // dialRemoteSSE forces the SSE transport (explicit config or auto-fallback).
@@ -616,7 +757,7 @@ func (d *Daemon) dialRemoteSSE(m *managed) (*client.Client, error) {
 		return nil, err
 	}
 	opts := []transport.ClientOption{
-		transport.WithHeaders(cfg.Headers),
+		transport.WithHeaders(remappedHeaders(cfg)),
 		transport.WithResponseTimeout(d.reqTO),
 		transport.WithHTTPClient(streamClient),
 	}
@@ -665,6 +806,9 @@ func (d *Daemon) remoteStack(m *managed) (rpcClient, streamClient *http.Client, 
 		ocfg.ClientSecret = cfg.OAuth.ClientSecret
 		if cfg.OAuth.Scope != "" {
 			ocfg.Scopes = []string{cfg.OAuth.Scope}
+		}
+		if cfg.OAuth.AuthorizationURL != "" {
+			ocfg.AuthServerMetadataURL = cfg.OAuth.AuthorizationURL
 		}
 	}
 	// DCR-registered credentials (slice B persists them): prefer stored
@@ -789,6 +933,7 @@ func (d *Daemon) ListTools(ctx context.Context, name string) ([]mcp.Tool, error)
 		return nil, err
 	}
 	cfg := m.getCfg()
+	fp := metacache.Fingerprint(cfg)
 	m.toolsMu.RLock()
 	memTools, memAt := m.tools, m.toolsCachedAt
 	m.toolsMu.RUnlock()
@@ -796,8 +941,16 @@ func (d *Daemon) ListTools(ctx context.Context, name string) ([]mcp.Tool, error)
 		if !cfg.IsRemote() || time.Since(memAt) <= RemoteToolsTTL {
 			return memTools, nil
 		}
+		if cfg.Pinned {
+			return memTools, nil
+		}
 		// Stale remote: one live revalidation; failure serves stale.
 		if tools, rerr := d.listToolsOnce(ctx, m); rerr == nil {
+			if cfg.NewTools == "hide" && d.cache != nil {
+				if known, ok := d.cache.Get(name, fp); ok {
+					tools = intersectTools(known, tools)
+				}
+			}
 			d.storeToolsGen(name, m, cfg, tools, genOf(m))
 			m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
 			return tools, nil
@@ -806,9 +959,11 @@ func (d *Daemon) ListTools(ctx context.Context, name string) ([]mcp.Tool, error)
 		return memTools, nil
 	}
 
-	fp := metacache.Fingerprint(cfg)
+	var diskTools []mcp.Tool
+	diskHit := false
 	if d.cache != nil {
 		if tools, ok := d.cache.Get(name, fp); ok {
+			diskTools, diskHit = tools, true
 			m.toolsMu.Lock()
 			m.tools = tools
 			m.toolsCachedAt = time.Now()
@@ -838,9 +993,29 @@ func (d *Daemon) ListTools(ctx context.Context, name string) ([]mcp.Tool, error)
 		d.recordFailure(m, err)
 		return nil, err
 	}
+	if cfg.NewTools == "hide" && diskHit {
+		tools = intersectTools(diskTools, tools)
+	}
 	d.storeToolsGen(name, m, cfg, tools, gen)
 	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
 	return tools, nil
+}
+
+// intersectTools keeps only live tools already known in the cache snapshot,
+// matched case-insensitively by name. New upstream tools stay hidden until
+// the operator clears new_tools=hide.
+func intersectTools(known, live []mcp.Tool) []mcp.Tool {
+	have := map[string]bool{}
+	for _, t := range known {
+		have[strings.ToLower(t.Name)] = true
+	}
+	out := live[:0:0]
+	for _, t := range live {
+		if have[strings.ToLower(t.Name)] {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // genOf reads the config generation (Reload bumps it on modify).
@@ -859,6 +1034,13 @@ func (d *Daemon) storeTools(name string, m *managed, cfg config.ServerEntry, too
 // the live call started (Reload cleared the cache; stale results must not
 // repopulate it). wantGen is the generation captured before the live call.
 func (d *Daemon) storeToolsGen(name string, m *managed, cfg config.ServerEntry, tools []mcp.Tool, wantGen int) {
+	d.storeToolsGenForce(name, m, cfg, tools, wantGen, false)
+}
+
+// storeToolsGenForce is storeToolsGen with an override for RefreshTools:
+// forceDisk writes the disk snapshot even when pinned. Normal paths never
+// set it — a pin means frozen, and only an explicit refresh may thaw it.
+func (d *Daemon) storeToolsGenForce(name string, m *managed, cfg config.ServerEntry, tools []mcp.Tool, wantGen int, forceDisk bool) {
 	if genOf(m) != wantGen {
 		return
 	}
@@ -866,9 +1048,89 @@ func (d *Daemon) storeToolsGen(name string, m *managed, cfg config.ServerEntry, 
 	m.tools = tools
 	m.toolsCachedAt = time.Now()
 	m.toolsMu.Unlock()
+	if cfg.Pinned && !forceDisk {
+		return
+	}
 	if d.cache != nil {
 		d.cache.Put(name, metacache.Fingerprint(cfg), tools)
 	}
+}
+
+// RefreshTools forces a live re-fetch and replaces the snapshot baseline:
+// memory + disk are stored unconditionally (even when pinned), with no
+// hide-intersect. Opt-in freeze (pinned / new_tools=hide) never self-heals;
+// refresh is the operator's explicit "trust current upstream" button.
+// A failed fetch keeps the old baseline untouched (a failed refresh changes
+// nothing; a successful one that returns fewer tools narrows the snapshot —
+// that foot-gun is the operator's, fixed by fixing upstream + refreshing
+// again). Returns added/removed tool names (live vs old baseline,
+// case-insensitive, sorted, never nil).
+func (d *Daemon) RefreshTools(ctx context.Context, name string) (tools []mcp.Tool, added, removed []string, err error) {
+	m, err := d.get(name)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	cfg := m.getCfg()
+	fp := metacache.Fingerprint(cfg)
+	m.toolsMu.RLock()
+	old := m.tools
+	m.toolsMu.RUnlock()
+	if old == nil && d.cache != nil {
+		if disk, ok := d.cache.Get(name, fp); ok {
+			old = disk
+		}
+	}
+	gen := genOf(m)
+	live, err := d.listToolsOnce(ctx, m)
+	if err != nil {
+		if aerr := d.mapAuthErr(m, cfg, err); aerr != nil {
+			d.recordFailure(m, aerr)
+			return nil, nil, nil, aerr
+		}
+		if cfg.IsRemote() && errors.Is(err, transport.ErrSessionTerminated) {
+			d.log.Info("session expired, re-initializing", "server", name)
+			d.resetClient(m)
+			live, err = d.listToolsOnce(ctx, m)
+		}
+	}
+	if err != nil {
+		if aerr := d.mapAuthErr(m, cfg, err); aerr != nil {
+			d.recordFailure(m, aerr)
+			return nil, nil, nil, aerr
+		}
+		d.recordFailure(m, err)
+		return nil, nil, nil, err
+	}
+	added, removed = diffToolNames(old, live)
+	d.storeToolsGenForce(name, m, cfg, live, gen, true)
+	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	return live, added, removed, nil
+}
+
+// diffToolNames reports live tools missing from old (added, live casing)
+// and old tools missing from live (removed, cached casing).
+func diffToolNames(old, live []mcp.Tool) (added, removed []string) {
+	added, removed = []string{}, []string{}
+	oldHave := map[string]string{}
+	for _, t := range old {
+		oldHave[strings.ToLower(t.Name)] = t.Name
+	}
+	liveHave := map[string]bool{}
+	for _, t := range live {
+		lower := strings.ToLower(t.Name)
+		liveHave[lower] = true
+		if _, ok := oldHave[lower]; !ok {
+			added = append(added, t.Name)
+		}
+	}
+	for lower, name := range oldHave {
+		if !liveHave[lower] {
+			removed = append(removed, name)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	return added, removed
 }
 
 func (d *Daemon) listToolsOnce(ctx context.Context, m *managed) ([]mcp.Tool, error) {
@@ -976,6 +1238,11 @@ func (d *Daemon) PendingLogin(name string) bool {
 
 // InvalidateTools drops the discovery cache but keeps the connection.
 // Used for tools/list_changed notifications and tests.
+//
+// Pinned servers keep their disk snapshot: a pin means frozen, and only an
+// explicit refresh may thaw it. Push clears memory so the next list goes
+// live, but the frozen baseline survives — after a restart the pin still
+// serves the last refresh, not whatever arrived over the wire.
 func (d *Daemon) InvalidateTools(name string) {
 	d.mu.RLock()
 	m, ok := d.servers[name]
@@ -983,9 +1250,13 @@ func (d *Daemon) InvalidateTools(name string) {
 	if !ok {
 		return
 	}
+	cfg := m.getCfg()
 	m.toolsMu.Lock()
 	m.tools = nil
 	m.toolsMu.Unlock()
+	if cfg.Pinned {
+		return
+	}
 	if d.cache != nil {
 		d.cache.Drop(name)
 	}
@@ -1330,6 +1601,9 @@ func (d *Daemon) CallTool(ctx context.Context, name, tool string, args map[strin
 	if err != nil {
 		return nil, err
 	}
+	if perr := checkParams(m.getCfg(), tool, args); perr != nil {
+		return nil, perr
+	}
 	m.mu.Lock()
 	m.inFlight++
 	m.mu.Unlock()
@@ -1364,12 +1638,59 @@ func (d *Daemon) CallTool(ctx context.Context, name, tool string, args map[strin
 	return res, nil
 }
 
+// ParamDeniedError reports a rejected tool argument under allowed_params.
+type ParamDeniedError struct {
+	Server  string
+	Tool    string
+	Params  []string
+	Allowed []string
+}
+
+func (e *ParamDeniedError) Error() string {
+	return fmt.Sprintf("server %q tool %q: parameters %v are not allowed (allowed: %v)", e.Server, e.Tool, e.Params, e.Allowed)
+}
+
+// checkParams enforces [servers.x.params]: when a tool has an entry, only
+// listed argument names pass. No entry = all parameters allowed.
+func checkParams(cfg config.ServerEntry, tool string, args map[string]any) error {
+	allow, ok := cfg.Params[tool]
+	if !ok {
+		return nil
+	}
+	if len(args) == 0 {
+		return nil
+	}
+	allowed := map[string]bool{}
+	for _, p := range allow {
+		allowed[p] = true
+	}
+	var bad []string
+	for k := range args {
+		if !allowed[k] {
+			bad = append(bad, k)
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.Strings(bad)
+	return &ParamDeniedError{Server: cfg.Name, Tool: tool, Params: bad, Allowed: allow}
+}
+
+// effectiveTimeout resolves per-server tool_timeout (seconds) over default.
+func effectiveTimeout(cfg config.ServerEntry, dflt time.Duration) time.Duration {
+	if cfg.ToolTimeout != nil && *cfg.ToolTimeout > 0 {
+		return time.Duration(*cfg.ToolTimeout) * time.Second
+	}
+	return dflt
+}
+
 func (d *Daemon) callToolOnce(ctx context.Context, m *managed, tool string, args map[string]any) (*mcp.CallToolResult, error) {
 	c, err := d.clientFor(ctx, m)
 	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, d.reqTO)
+	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
 	defer cancel()
 	start := time.Now()
 	res, err := c.CallTool(reqCtx, mcp.CallToolRequest{
@@ -1556,6 +1877,10 @@ func (d *Daemon) EagerStart(ctx context.Context) {
 func (d *Daemon) Reload(cfg *config.Config) (added, removed, modified []string) {
 	d.mu.Lock()
 	d.daemonCfg = cfg.Daemon
+	d.groups = maps.Clone(cfg.Groups)
+	if d.groups == nil {
+		d.groups = map[string]config.GroupEntry{}
+	}
 	fps := map[string]string{}
 	want := map[string]config.ServerEntry{}
 	for name, s := range cfg.Servers {

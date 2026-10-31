@@ -234,22 +234,29 @@ Verification: `V-GUARD-006`.
 
 ### Requirement: Config schema and `OXYP_DIR`
 
-Top-level TOML is EXACTLY `[daemon]` + `[servers.<name>]` (key IS the
-name). `[daemon]`: `addr` (default `127.0.0.1:8379` applied after
+Top-level TOML is `[daemon]` + `[servers.<name>]` (key IS the name) +
+`[groups.<name>]` (curated subset: `description`, `servers` member list;
+unknown members never fail the load — daemon skips, doctor reports).
+`[daemon]`: `addr` (default `127.0.0.1:8379` applied after
 validation), `token`, `connectors_dir` (default `<dir>/connectors`),
 `idle_timeout` (default 10, 0 = never), `output_guard`
 (defaults 51200/2000), `trace` (defaults `<dir>/trace.jsonl`, 262144,
 10000). Per server: `description`, `command` XOR `url` (URL needs
 `http(s)://`), `transport` (`""`/`sse`), `headers` (nonblank, no CR/LF),
 `env`, `cwd`, `inherit_env`, `enabled` (nil = true), `tools`
-`{allow, deny}` (nonblank globs), `tls` (cert+key both/neither, files
-statable), `auth` (`""`/`oauth`, remote-only), `oauth` (`flow`
-browser/device/token, `grant_type` `""`/client_credentials + id/secret,
-`callback_port ≥ 0`, `timeout ≥ 0`), `lifecycle` enum, `idle_timeout`,
-`output_guard`, `trace`. Unknown lifecycle/idle/guard/trace values and
-local `transport`/`headers`/`tls`/`auth`/`oauth` (or local-no-command)
-become per-entry `ConfigError` — `Load` fails ONLY for
-unreadable/unparseable TOML, bad `daemon.token` expansion, or
+`{allow, deny}` (nonblank globs), `params` (tool → allowed arg names,
+nonblank), `tls` (cert+key both/neither, files statable), `auth`
+(`""`/`oauth`, remote-only), `oauth` (`flow` browser/device/token,
+`grant_type` `""`/client_credentials + id/secret, `callback_port ≥ 0`,
+`timeout ≥ 0`, `authorization_url`/`token_url`/`registration_url` discovery
+overrides), `lifecycle` enum, `idle_timeout`, `tool_timeout` (per-RPC
+seconds, ≥ 0, 0 = default), `token_header` (remaps static `Authorization`,
+no CR/LF/colon), `passthrough_headers` (remote-only allowlist),
+`new_tools` (`""`/expose/hide), `pinned` bool, `output_guard`, `trace`.
+Unknown lifecycle/idle/guard/trace values and local
+`transport`/`headers`/`tls`/`auth`/`oauth` (or local-no-command) plus
+local `passthrough_headers` become per-entry `ConfigError` — `Load` fails
+ONLY for unreadable/unparseable TOML, bad `daemon.token` expansion, or
 `ValidateDaemon` failure. Dir precedence:
 `--dir` > `OXYP_DIR` > `XDG_CONFIG_HOME/oxyp` > `~/.oxyp`.
 

@@ -193,8 +193,10 @@ closes happen outside the daemon lock with a 5 s per-client cap.
 
 `daemonCfg` (idle/guard/trace values) applies immediately, but the tracer
 file itself opens only at startup — enabling trace needs a restart.
-Listener addr and bearer token are NEVER applied by reload; the startup
-values stay, the endpoint file keeps them, and the daemon logs
+`[groups.*]` are re-read and swapped atomically under the same lock (no
+restart, no connection impact; unknown members are skipped at read time,
+never fatal). Listener addr and bearer token are NEVER applied by reload;
+the startup values stay, the endpoint file keeps them, and the daemon logs
 `oxyp: daemon addr/token changed — restart required` to stderr. SIGHUP
 reload discards errors silently; `POST /reload` returns
 `{added, removed, modified}` or HTTP 500. A per-server generation counter
@@ -206,8 +208,6 @@ discards clients spawned from pre-reload config.
 - **WHEN** the operator edits B's command and runs `oxyp reload`
 - **THEN** the response is `{added: [], removed: [], modified: [B]}`,
   A's connection is untouched, and B is cold with cleared caches.
-
-*Definition of Done: If this scenario passes, the requirement is met.*
 
 #### Scenario: Token rotation needs restart
 

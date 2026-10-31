@@ -14,8 +14,7 @@ links:
 
 ## Purpose
 
-This spec covers the daemon's own REST API (10 routes + auth gate), the
-CSRF/token policy that protects a loopback daemon with no token, the stdio
+This spec covers the daemon's own REST API (11 routes + auth gate), the
 shim that turns that REST into 5 MCP meta-tools, and the media passthrough
 that keeps image/audio/resource blocks native end to end. It matters
 because every MCP client attaches through the shim, and every agent action
@@ -57,17 +56,17 @@ wrong method → 405 plain text; unknown path → 404; JSON always
 
 | Method + path | Request | Success | Errors |
 |---|---|---|---|
-| `GET /servers` | `?filter=` substring of name/description | `{servers: [{name, description, instructions?, healthy?, error?, auth_required?, connected}]}`; instructions only when connected + cached; never spawns | gate only |
-| `GET /servers/{name}/tools` | — | `{tools: [{name, description}]}`; denied omitted | 404 server; 401 auth; 502 downstream |
-| `GET /servers/{name}/tools/{tool}` | — | `{name, description, inputSchema}`; match case-insensitive; deny checked pre-downstream | 404 server/denied/unknown; 401/502 |
-| `POST /servers/{name}/tools/{tool}` | `{parameters: {...}}`, body cap 64 MiB, empty ⇒ nil | `{content: [...], isError, structuredContent?, _meta?}` | 404; 403 policy block; 400 bad JSON; 401; 502 |
+| `GET /servers` | `?filter=` substring of name/description, `?group=` curated subset | `{servers: [{name, description, instructions?, healthy?, error?, auth_required?, connected}]}`; instructions only when connected + cached; never spawns | gate only; 404 unknown group |
+| `GET /servers/{name}/tools` | `?group=` — server outside group ⇒ 403 | `{tools: [{name, description}]}`; denied omitted | 404 server/group; 403 outside group; 401 auth; 502 downstream |
+| `GET /servers/{name}/tools/{tool}` | `?group=` gate | `{name, description, inputSchema}`; match case-insensitive; deny checked pre-downstream | 404 server/denied/unknown/group; 403 outside group; 401/502 |
+| `POST /servers/{name}/tools/{tool}` | `{parameters: {...}}`, body cap 64 MiB, empty ⇒ nil; `?group=` gate | `{content: [...], isError, structuredContent?, _meta?}` | 404; 403 policy/param/group block; 400 bad JSON; 401; 502 |
 | `GET /servers/{name}/resources` | — | `{resources: [{uri, name, description, mimeType}], instructions}`; unsupported ⇒ `{resources: [], instructions}` | 404; 401/502 |
 | `GET /servers/{name}/resources/{uri…}` | tail or `?uri=`, exactly one | `{contents: [...]}` | 400 both/neither; `..` ⇒ 502; 401/502 |
 | `GET /servers/{name}/prompts` | — | `{prompts: [{name, description, arguments}]}`; unsupported ⇒ `{prompts: []}` | 404; 401/502 |
-| `GET /tools` | `?q=&server=&regex=&limit=&offset=` (defaults 12/0; `regex` truthy `1`/`true`; numeric-prefix ints) | `{tools: [{server, name, description, score}], total, nextOffset}`; empty q ⇒ `[]` | 400 unknown server/bad regex |
+| `GET /tools` | `?q=&server=&group=&regex=&limit=&offset=` (defaults 12/0; `regex` truthy `1`/`true`; numeric-prefix ints) | `{tools: [{server, name, description, score}], total, nextOffset}`; empty q ⇒ `[]`; group filters post-page | 400 unknown server/bad regex; 404 unknown group |
 | `GET /health` | — | `{servers: {name: {connected, healthy?, error?, auth_required?}}}`; error redacted; never spawns | gate only |
 | `POST /reload` | — | `{added, removed, modified}` | 500 load failure; GET ⇒ 405 |
-
+| `POST /servers/{name}/refresh` | — (group param ignored: refresh is per-server, not per-view) | `{tools: [names], added: [...], removed: [...]}` (live vs old baseline); failure changes nothing | 404 unknown server; 401 auth; 502 downstream |
 Resources/prompts are live passthrough (they spawn cold servers; no disk
 cache — bodies are live data). Servers without support return `[]`.
 Instructions ride the resource list even for tools-only servers.
@@ -156,17 +155,27 @@ see the CLI spec). All errors use code `-32000`.
 **I want** the strictest-common-denominator server
 **So that** one `{command: [oxyp, shim]}` line works everywhere.
 
-The five tools: `list_servers` (optional `filter`), `list_tools`
-(`server` required), `describe_tool` (`server` + `tools[]`;
+The five tools: `list_servers` (optional `filter`/`group`), `list_tools`
+(`server` required, `group` gates), `describe_tool` (`server` + `tools[]`;
 skips empty/non-strings; N sequential GETs, first failure aborts),
 `call` (`server` + `tool`, `parameters` non-map ⇒ `{}`),
-`search_tools` (`query` required non-empty; optional `server`/`regex`/
-`limit`/`offset`, non-positive numbers ignored). Discovery results are
+`search_tools` (`query` required non-empty; optional `server`/`group`/
+`regex`/`limit`/`offset`, non-positive numbers ignored). Discovery results are
 JSON-in-text; only `call` preserves `structuredContent`/`_meta`.
+`--group` (or `OXYP_GROUP`) appends `?group=` to every daemon call;
+unknown group surfaces the daemon 404 as a tool error.
 POST failures render `"<error> (<auth_required>)"`; GET failures embed the
 raw daemon body. Path segments are `PathEscape`d; queries use
 `url.Values`. The shim itself writes nothing to stderr (daemon drains
 child stderr into its log, redacted).
+
+`POST /mcp` serves the same 5 tools over Streamable HTTP for URL-only
+clients (mcp-go `NewStreamableHTTPServer`, stateful sessions). Handlers call
+the daemon directly (no HTTP loopback): same deny/param/group gates, same
+guard, same cold semantics. `group` rides per-tool args (`list_servers`,
+`list_tools`, `search_tools`) or `OXYP_GROUP` (describe/call, one group per
+client). Tool failures return `isError` content (never bare JSON-RPC errors)
+so model clients read and recover.
 
 #### Scenario: One-line attach lists tools instantly
 

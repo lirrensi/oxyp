@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // runShim bridges MCP stdio clients to the oxyp HTTP daemon.
@@ -33,6 +34,30 @@ type rpcResp struct {
 type rpcErr struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+// shimGroup scopes the shim to a curated subset ([groups.*]).
+// --group wins; OXYP_GROUP is the default (one group per client).
+var shimGroup string
+
+func shimGroupName() string {
+	if shimGroup != "" {
+		return shimGroup
+	}
+	return os.Getenv("OXYP_GROUP")
+}
+
+// withGroup appends ?group= (or &group=) when scoping is configured.
+func withGroup(path string) string {
+	g := shimGroupName()
+	if g == "" {
+		return path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "group=" + url.QueryEscape(g)
 }
 
 var metaTools = []map[string]any{
@@ -229,7 +254,7 @@ func dispatchNative(
 		if f := str("filter"); f != "" {
 			path += "?filter=" + url.QueryEscape(f)
 		}
-		v, err := get(path)
+		v, err := get(withGroup(path))
 		if err != nil {
 			return nil, err
 		}
@@ -252,7 +277,7 @@ func dispatchNative(
 		if n, ok := args["offset"].(float64); ok && n > 0 {
 			vals.Set("offset", strconv.Itoa(int(n)))
 		}
-		v, err := get("/tools?" + vals.Encode())
+		v, err := get(withGroup("/tools?" + vals.Encode()))
 		if err != nil {
 			return nil, err
 		}
@@ -262,7 +287,7 @@ func dispatchNative(
 		if srv == "" {
 			return nil, fmt.Errorf("server required")
 		}
-		v, err := get("/servers/" + url.PathEscape(srv) + "/tools")
+		v, err := get(withGroup("/servers/" + url.PathEscape(srv) + "/tools"))
 		if err != nil {
 			return nil, err
 		}
@@ -279,7 +304,7 @@ func dispatchNative(
 				if ns == "" {
 					continue
 				}
-				v, err := get("/servers/" + url.PathEscape(srv) + "/tools/" + url.PathEscape(ns))
+				v, err := get(withGroup("/servers/" + url.PathEscape(srv) + "/tools/" + url.PathEscape(ns)))
 				if err != nil {
 					return nil, err
 				}
@@ -296,7 +321,7 @@ func dispatchNative(
 		if params == nil {
 			params = map[string]any{}
 		}
-		v, err := post("/servers/"+url.PathEscape(srv)+"/tools/"+url.PathEscape(cmd), map[string]any{"parameters": params})
+		v, err := post(withGroup("/servers/"+url.PathEscape(srv)+"/tools/"+url.PathEscape(cmd)), map[string]any{"parameters": params})
 		if err != nil {
 			return nil, err
 		}

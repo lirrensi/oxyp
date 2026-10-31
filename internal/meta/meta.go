@@ -35,6 +35,7 @@ import (
 	"github.com/lirrensi/oxyp/internal/perms"
 	"github.com/lirrensi/oxyp/internal/redact"
 	"github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
 // Server wires HTTP handlers to a daemon + reload func.
@@ -62,6 +63,8 @@ func New(d *daemon.Daemon, reload func() (added, removed, modified []string, err
 	s.mux.HandleFunc("GET /tools", s.handleSearch)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("POST /reload", s.handleReload)
+	s.mux.HandleFunc("POST /servers/{name}/refresh", s.handleRefresh)
+	s.mux.Handle("POST /mcp", mcpserver.NewStreamableHTTPServer(s.mcpGateway()))
 	return s
 }
 
@@ -186,8 +189,18 @@ type serverInfo struct {
 
 func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 	filter := strings.ToLower(r.URL.Query().Get("filter"))
+	group := r.URL.Query().Get("group")
+	if group != "" {
+		if _, ok := s.d.GroupMembers(group); !ok {
+			writeErr(w, http.StatusNotFound, "group not found")
+			return
+		}
+	}
 	var out []serverInfo
 	for _, name := range s.d.Names() {
+		if !s.d.InGroup(group, name) {
+			continue
+		}
 		e := s.d.Entry(name)
 		if e == nil {
 			continue // concurrent reload removed it
@@ -229,12 +242,20 @@ type toolStub struct {
 
 func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if group := r.URL.Query().Get("group"); group != "" && !s.d.InGroup(group, name) {
+		if _, ok := s.d.GroupMembers(group); !ok {
+			writeErr(w, http.StatusNotFound, "group not found")
+		} else {
+			writeErr(w, http.StatusForbidden, "server not in group")
+		}
+		return
+	}
 	e := s.d.Entry(name)
 	if e == nil {
 		writeErr(w, http.StatusNotFound, "server not found")
 		return
 	}
-	tools, err := s.d.ListTools(r.Context(), name)
+	tools, err := s.d.ListTools(daemon.WithPassthrough(r.Context(), r.Header, e.PassthroughHeaders), name)
 	if err != nil {
 		writeDownstreamErr(w, err)
 		return
@@ -251,6 +272,14 @@ func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request) {
 	name, tool := r.PathValue("name"), r.PathValue("tool")
+	if group := r.URL.Query().Get("group"); group != "" && !s.d.InGroup(group, name) {
+		if _, ok := s.d.GroupMembers(group); !ok {
+			writeErr(w, http.StatusNotFound, "group not found")
+		} else {
+			writeErr(w, http.StatusForbidden, "server not in group")
+		}
+		return
+	}
 	e := s.d.Entry(name)
 	if e == nil {
 		writeErr(w, http.StatusNotFound, "server not found")
@@ -261,7 +290,7 @@ func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "tool not found")
 		return
 	}
-	tools, err := s.d.ListTools(r.Context(), name)
+	tools, err := s.d.ListTools(daemon.WithPassthrough(r.Context(), r.Header, e.PassthroughHeaders), name)
 	if err != nil {
 		writeDownstreamErr(w, err)
 		return
@@ -380,6 +409,13 @@ func isUnsupported(err error) bool {
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	group := q.Get("group")
+	if group != "" {
+		if _, ok := s.d.GroupMembers(group); !ok {
+			writeErr(w, http.StatusNotFound, "group not found")
+			return
+		}
+	}
 	hits, total, next, err := s.d.SearchTools(
 		q.Get("server"), q.Get("q"), q.Get("regex") == "1" || q.Get("regex") == "true",
 		atoiOr(q.Get("limit"), 12), atoiOr(q.Get("offset"), 0))
@@ -389,6 +425,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []map[string]any{}
 	for _, h := range hits {
+		if !s.d.InGroup(group, h.Server) {
+			continue
+		}
 		out = append(out, map[string]any{
 			"server": h.Server, "name": h.Name,
 			"description": h.Description, "score": h.Score,
@@ -410,6 +449,16 @@ func atoiOr(s string, dflt int) int {
 
 func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	name, tool := r.PathValue("name"), r.PathValue("tool")
+	if group := r.URL.Query().Get("group"); group != "" {
+		if _, ok := s.d.GroupMembers(group); !ok {
+			writeErr(w, http.StatusNotFound, "group not found")
+			return
+		}
+		if !s.d.InGroup(group, name) {
+			writeErr(w, http.StatusForbidden, "server not in group")
+			return
+		}
+	}
 	e := s.d.Entry(name)
 	if e == nil {
 		writeErr(w, http.StatusNotFound, "server not found")
@@ -435,7 +484,7 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	res, err := s.d.CallTool(r.Context(), name, tool, body.Parameters)
+	res, err := s.d.CallTool(daemon.WithPassthrough(r.Context(), r.Header, e.PassthroughHeaders), name, tool, body.Parameters)
 	if err != nil {
 		writeDownstreamErr(w, err)
 		return
@@ -459,8 +508,33 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// handleRefresh forces a live re-fetch and replaces the snapshot baseline
+// (the operator's "trust current upstream" button for pinned/hide servers).
+// Unknown server → 404; passthrough headers apply. Envelope:
+// {"tools": [...], "added": [...], "removed": [...]}.
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	e := s.d.Entry(name)
+	if e == nil {
+		writeErr(w, http.StatusNotFound, "server not found")
+		return
+	}
+	tools, added, removed, err := s.d.RefreshTools(
+		daemon.WithPassthrough(r.Context(), r.Header, e.PassthroughHeaders), name)
+	if err != nil {
+		writeDownstreamErr(w, err)
+		return
+	}
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		names = append(names, t.Name)
+	}
+	writeJSON(w, map[string]any{"tools": names, "added": added, "removed": removed})
+}
+
 // writeDownstreamErr maps downstream failures: auth-needed gets 401 + the
-// login hint (lazy-mcp AUTH_REQUIRED shape); everything else 502.
+// login hint (lazy-mcp AUTH_REQUIRED shape); param-denied gets 403 +
+// the allowed list; everything else 502.
 func writeDownstreamErr(w http.ResponseWriter, err error) {
 	var authErr *daemon.AuthNeededError
 	if errors.As(err, &authErr) {
@@ -469,6 +543,17 @@ func writeDownstreamErr(w http.ResponseWriter, err error) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error":         redact.Body(err.Error()),
 			"auth_required": "run: oxyp login " + authErr.Server,
+		})
+		return
+	}
+	var paramErr *daemon.ParamDeniedError
+	if errors.As(err, &paramErr) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":   err.Error(),
+			"allowed": paramErr.Allowed,
+			"_meta":   map[string]string{"oxypPolicy": "param-blocked"},
 		})
 		return
 	}

@@ -56,15 +56,17 @@ entries have no age expiry.
 
 The fingerprint is 32 hex chars (128-bit SHA-256 prefix) over command
 (`\x00`-joined), URL, transport, sorted headers/env, cwd, inherit_env
-(when non-nil), auth, TLS dump, and OAuth
-`client_id|scope|callback_port|flow|timeout`. Excluded: description, tools,
-enabled, lifecycle, idle, guard, trace, name, connector origin, OAuth
-secret/redirect/grant. `Put` happens only after a successful live
-`tools/list`; every mutation rewrites the whole file atomically (unique
-temp + chmod 0600 + rename; saves serialized; errors silent). Corrupt,
-missing, unreadable, or `{"servers": null}` files degrade to an empty
-cache — never an error, never a partial salvage. Resources, prompts, and
-instructions are NEVER persisted.
+(when non-nil), auth, TLS dump, OAuth
+`client_id|scope|callback_port|flow|timeout|authorization_url|token_url|registration_url`,
+and `hide` flag + effective per-server `tool_timeout`. Excluded: description,
+tools, enabled, lifecycle, idle, guard, trace, name, connector origin, OAuth
+secret/redirect/grant, `pinned`, `params`, `passthrough_headers`, `token_header`
+(presentation-time, not identity). `Put` happens only after a successful live
+`tools/list` and is skipped while `pinned`. Every mutation rewrites the whole
+file atomically (unique temp + chmod 0600 + rename; saves serialized; errors
+silent). Corrupt, missing, unreadable, or `{"servers": null}` files degrade
+to an empty cache — never an error, never a partial salvage. Resources,
+prompts, and instructions are NEVER persisted.
 
 #### Scenario: Restart reuses metadata
 
@@ -84,6 +86,36 @@ instructions are NEVER persisted.
 
 Verification: `V-DISC-001`.
 
+### Requirement: Pinned snapshots and hidden newcomers
+
+`pinned = true` freezes discovery to the cache snapshot: `ListTools` serves
+memory/disk only and never goes live to refresh (disk seeds memory once when
+empty; live `storeTools` still fills memory but never writes disk). `doctor
+--live` diffs the live catalog against disk and reports
+`added=[...] removed=[...] (pinned: serving cache)`; empty when clean or when
+no cache baseline exists.
+
+`new_tools = "hide"` serves only tools already in the cache snapshot: the first
+seed stores the full live list; afterwards disk always wins (cold, no live
+fetch), stale-remote revalidation intersects the live result against disk and
+never stores newcomers, and the no-baseline live path intersects too. `doctor
+--live` reports the same drift shape with `(hidden by new_tools=hide)`.
+Default `new_tools = ""`/`expose` preserves the old behavior (newcomers flow).
+
+Both compose with deny-means-invisible (deny applies after pin/hide at every
+presentation boundary) and with `Reload` (generation-guarded stores still
+apply; fingerprint covers the `hide` flag so flipping it re-seeds).
+
+Refresh is the explicit thaw: `oxyp refresh <server>` (`POST
+/servers/{name}/refresh`) forces one live fetch and stores it as the new
+baseline — memory AND disk, no hide-intersect, no pin skip — and returns
+`{tools, added, removed}` (live vs old baseline). Freezing never self-heals:
+enabling the freeze makes the operator responsible for refreshing it. A
+failed refresh changes nothing; a successful one that returns fewer tools
+narrows the snapshot (the operator's foot-gun: fix upstream, refresh again).
+
+#### Scenario: New tool stays hidden
+
 ### Requirement: Invalidation triggers
 
 The system MUST invalidate tool metadata on config fingerprint change /
@@ -97,8 +129,11 @@ remote memory after a 5-minute TTL with stale-on-failure.
 
 Details: `DropStale` runs at construction and reload (enabled servers
 only — disabling drops the entry). `list_changed` clears memory and drops
-disk but keeps the connection. `resources/list_changed` and
-`prompts/list_changed` clear only memory resource/prompt caches.
+disk but keeps the connection — EXCEPT pinned servers keep their disk
+snapshot (a pin means frozen; only refresh may thaw it, so push clears
+memory and the next list goes live, but the frozen baseline survives a
+restart). `resources/list_changed` and `prompts/list_changed` clear only
+memory resource/prompt caches.
 Streamable-HTTP remotes have no push channel in this stack, so the TTL is
 their fallback: memory older than 5 min triggers one live revalidation;
 success stores (generation-guarded) and marks healthy, failure serves
@@ -111,8 +146,9 @@ TTL. Idle stop and `Close` never drop caches.
 
 - **GIVEN** a connected stdio server that emits `tools/list_changed`
 - **WHEN** the notification arrives
-- **THEN** memory is cleared and the disk entry dropped; the next list
-  goes live while the connection stays.
+- **THEN** memory is cleared and the disk entry dropped (unpinned); pinned
+  servers clear memory only — disk survives. The next list goes live while
+  the connection stays.
 
 *Definition of Done: If this scenario passes, the requirement is met.*
 
@@ -245,6 +281,50 @@ is broken.*
 *Definition of Done: If this scenario passes, the requirement is met.*
 
 Verification: `V-DISC-006` (incl. mutation: deny-branch removal is caught).
+
+### Requirement: Per-tool parameter allowlists
+
+`[servers.x.params]` maps tool name → allowed argument names. When a tool has
+an entry, `CallTool` rejects any call carrying an argument outside the list
+with `ParamDeniedError` (exact, case-sensitive match; no entry = all
+parameters allowed; empty args always pass). The REST envelope is 403
+`{"error": …, "allowed": [...], "_meta": {"oxypPolicy": "param-blocked"}}`;
+shim and `/mcp` surface it as an `isError` tool result. Params are
+presentation-time (excluded from the fingerprint) so edits take effect
+without cache invalidation.
+
+#### Scenario: Extra argument blocked
+
+- **GIVEN** `params.create_issue = ["title", "body"]`
+- **WHEN** calling `create_issue` with `{title, body, labels}`
+- **THEN** the call 403s naming `labels` and the allowed list.
+
+*Definition of Done: If the call executes, the system is broken.*
+
+Verification: `V-DISC-008` (new: params gate + 403 envelope).
+
+### Requirement: Opt-in per-request header passthrough
+
+`passthrough_headers` (remote-only) allowlists incoming HTTP request headers
+forwarded upstream per-request: the meta handler stashes whitelisted values
+(`daemon.WithPassthrough`, 8 KiB cap) into the call ctx, and the transport
+`headerFunc` injects them on every downstream request. Config `Headers` win
+on conflict; `Authorization` is never overridden (OAuth owns it). Applies to
+list/describe/call over Streamable HTTP and SSE; the `/mcp` gateway does not
+forward (no HTTP headers in its handler ctx). Discovery caching stays
+per-server, not per-credential.
+
+#### Scenario: BYO credential reaches upstream
+
+- **GIVEN** `passthrough_headers = ["X-Team-Token"]` and an incoming
+  `X-Team-Token: t` on `POST /servers/s/tools/call`
+- **WHEN** the downstream call runs
+- **THEN** upstream sees `X-Team-Token: t` unless config `headers` sets it.
+
+*Definition of Done: If the header is dropped or overrides config, the
+system is broken.*
+
+Verification: `V-DISC-010` (new: passthrough precedence unit).
 
 ## Data Contracts
 

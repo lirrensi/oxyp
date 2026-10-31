@@ -188,19 +188,23 @@ running elsewhere`) — stop it where it lives.
 
 | Command | What it does |
 | ------- | ------------ |
-| `oxyp servers` | list servers (autostarts the daemon) |
-| `oxyp tools <server>` | thin tool list (denied tools invisible) |
-| `oxyp search "query"` | ranked search, cached metadata, never spawns |
-| `oxyp describe <server> <tool>` | full schema for one tool |
-| `oxyp call <server> <tool> '<json>'` | invoke a tool |
+| `oxyp servers [--group]` | list servers (autostarts the daemon) |
+| `oxyp tools <server> [--group]` | thin tool list (denied tools invisible) |
+| `oxyp search "query" [--group]` | ranked search, cached metadata, never spawns |
+| `oxyp describe <server> <tool> [--group]` | full schema for one tool |
+| `oxyp call <server> <tool> '<json>' [--group]` | invoke a tool |
 | `oxyp status` | daemon + per-server health |
-| `oxyp doctor [--live]` | validate config, or probe every server |
+| `oxyp doctor [--live]` | validate config (+ group audit), or probe every server (+ pin/hide drift) |
 | `oxyp add <url> [--name] [--write]` | probe a URL + append a server entry |
 | `oxyp import [--from …] [--write]` | convert cursor/claude/vscode/opencode/omp configs |
 | `oxyp login <server>` | OAuth login (browser/device/token per config) |
 | `oxyp reload` | re-read config (or `kill -HUP`) |
+| `oxyp refresh <server>` | force live re-fetch, replace the pin/hide snapshot (shows added/removed) |
 | `oxyp stop` | stop the daemon (idempotent) |
 | `oxyp restart` | stop + start (picks up addr/token changes) |
+
+`--group` (or `OXYP_GROUP`) scopes to a `[groups.*]` subset; `oxyp shim
+--group` scopes a whole client. URL-only clients use `POST /mcp` (same 5 tools).
 
 ## Configure
 
@@ -213,13 +217,25 @@ addr = "127.0.0.1:8379"   # empty token = loopback trust ONLY
 [servers.github]
 url = "https://api.githubcopilot.com/mcp/"
 auth = "oauth"
+new_tools = "hide"       # upstream additions stay hidden until reviewed
+pinned = true            # freeze discovery to the cache snapshot
+# `oxyp refresh github` re-trusts upstream when you're ready (freezing never self-heals)
+tool_timeout = 60        # per-RPC seconds (default 10)
+token_header = "X-API-Key"  # static Authorization goes out under this name
 
 [servers.github.tools]
 allow = ["*"]
 deny = ["delete_*"]       # deny = invisible + blocked, always wins
 
+[servers.github.params]
+create_issue = ["title", "body", "labels"]  # extra args 403
+
 [servers.notes]
 command = ["python3", "/srv/mcp/notes.py"]   # local stdio child
+
+[groups.coding]
+description = "code review tools"
+servers = ["github"]      # missing members skipped; doctor reports them
 ```
 
 Secrets ride `${VAR}` / `{file:/path}` — expanded at load, redacted in logs, never stored by oxyp. Drop executable one-file servers into `~/.oxyp/connectors/` and they're auto-discovered by filename. Bad entries degrade to "unhealthy" in `status`; they never kill the daemon.
@@ -253,8 +269,8 @@ Never guess schemas — describe first.
 
 ## Honest limits
 
-- **No per-call approval popups.** The daemon has no UI to ask through — permissions are config (`deny`/hide). Ask-gates belong on the client side of the pipe.
-- **The daemon's HTTP API is oxyp's own REST, not MCP.** MCP clients attach via the shim (local or `OXYP_URL` remote); pointing a raw MCP client at the daemon URL won't speak MCP.
+- **No per-call approval popups.** The daemon has no UI to ask through — permissions are config (`deny`/hide, `params`, groups). Ask-gates belong on the client side of the pipe.
+- **Two doors, same 5 tools.** MCP clients attach via the shim (`command: [oxyp, shim]`, local or `OXYP_URL` remote) or raw Streamable HTTP at `POST /mcp` (URL-only clients, same meta-tools, same gates; bearer + `Origin` checks apply).
 - **One user per daemon dir** — a different identity is a second `--dir`.
 - **Proven, not promised:** 46 real GitHub tools through the daemon — search, schema, invoke — and this very repo was created with `oxyp call github create_repository`. Dogfooded on day one.
 

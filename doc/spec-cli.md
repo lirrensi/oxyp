@@ -44,10 +44,9 @@ sibling specs).
 
 ### Requirement: Command table and autostart
 
-The binary MUST offer 15 subcommands under global `[--dir <dir>]` (which
+The binary MUST offer 16 subcommands under global `[--dir <dir>]` (which
 beats all dir resolution): `daemon`, `call`, `servers`, `tools`, `search`,
-`describe`, `status`, `reload`, `stop`, `restart`, `shim`, `login`, `doctor`, `add`, `import`.
-
+`describe`, `status`, `reload`, `refresh`, `stop`, `restart`, `shim`, `login`, `doctor`, `add`, `import`.
 **As a** operator
 **I want** one binary for everything
 **So that** no separate client tools are needed.
@@ -55,21 +54,24 @@ beats all dir resolution): `daemon`, `call`, `servers`, `tools`, `search`,
 | Command | Args / flags | Action |
 |---|---|---|
 | `daemon` | `--dir` only | foreground daemon (trace, 10/30/60/120 s HTTP, 0600 endpoint, SIGHUP, 10 s shutdown) |
-| `call` | `<server> <tool> [json]` | `POST /servers/{s}/tools/{t}` `{parameters}`; bad JSON → `bad json args`; ≥400 → exit 1 |
-| `servers` | `--filter` | `GET /servers[?filter=]` |
-| `tools` | `<server>` | `GET /servers/{s}/tools` |
-| `search` | `<query>`; `--server/--regex/--limit=12/--offset=0` | `GET /tools?…`; cached metadata, never spawns |
-| `describe` | `<server> <tool>` | `GET /servers/{s}/tools/{t}` |
+| `call` | `<server> <tool> [json]`; `--group` | `POST /servers/{s}/tools/{t}[?group=]` `{parameters}`; bad JSON → `bad json args`; ≥400 → exit 1 |
+| `servers` | `--filter/--group` | `GET /servers[?filter=&group=]` |
+| `tools` | `<server>`; `--group` | `GET /servers/{s}/tools[?group=]` |
+| `search` | `<query>`; `--server/--group/--regex/--limit=12/--offset=0` | `GET /tools?…`; cached metadata, never spawns |
+| `describe` | `<server> <tool>`; `--group` | `GET /servers/{s}/tools/{t}[?group=]` |
 | `status` | — | `GET /health` (ignores HTTP status) |
 | `reload` | — | `POST /reload`; ≥400 → exit 1 |
+| `refresh` | `<server>` | `POST /servers/{s}/refresh`; prints `{tools, added, removed}`; failed fetch changes nothing; ≥400 → exit 1 |
 | `stop` | — | SIGTERM endpoint PID, wait ~5 s (then SIGKILL), remove endpoint; not-running → `daemon not running`, exit 0 |
 | `restart` | — | `stop` (tolerates not-running) then autostart; prints new PID |
-| `shim` | — | stdio JSON-RPC ↔ daemon HTTP |
+| `shim` | `--group` | stdio JSON-RPC ↔ daemon HTTP; `OXYP_GROUP` default; `?group=` on every call |
 | `login` | `<server>`; `--complete <url-or-code>` | flow dispatch, 5 min ctx; port rules per OAuth spec |
-| `doctor` | `--live/--json` | offline validation or 15 s-per-server live probe |
+| `doctor` | `--live/--json` | offline validation (+ group member audit) or 15 s-per-server live probe (+ pin/hide drift notes) |
 | `add` | `<url>`; `--name/--write` | probe + append `[servers.<name>]` |
 | `import` | `--from all\|cursor\|claude\|vscode\|opencode\|omp`; `--write` | preview + append foreign servers |
 
+`--group` resolves over `OXYP_GROUP` env (`cliGroup`: flag wins, env is the
+default; one group per client invocation).
 Shared: 60 s HTTP client, bearer from `daemon.json` (or `OXYP_TOKEN` in
 remote mode), pretty JSON print, `exit 1` on Cobra errors and checked
 ≥400s. Autostart: read endpoint (reject empty URL / `PID ≤ 0` / dead

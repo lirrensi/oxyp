@@ -39,6 +39,15 @@ func DefaultDir() string {
 type Config struct {
 	Daemon  DaemonConfig           `toml:"daemon"`
 	Servers map[string]ServerEntry `toml:"servers"`
+	Groups  map[string]GroupEntry  `toml:"groups"`
+}
+
+// GroupEntry is a named subset of servers (curated view).
+// Members are server names; missing members are skipped with a warning
+// (never fatal). Groups only narrow: deny policy and pins still apply.
+type GroupEntry struct {
+	Description string   `toml:"description"`
+	Servers     []string `toml:"servers"`
 }
 
 // DaemonConfig holds daemon-wide settings.
@@ -128,6 +137,25 @@ type ServerEntry struct {
 	OutputGuard *OutputGuardConfig `toml:"output_guard"`
 	// Trace overrides daemon trace for this server.
 	Trace *TraceConfig `toml:"trace"`
+	// NewTools controls upstream-added tools: "" (expose, default) | expose | hide.
+	// hide serves only tools known in cache and never stores newcomers.
+	NewTools string `toml:"new_tools"`
+	// Pinned freezes discovery to the cache snapshot: ListTools serves
+	// memory/disk only (seeds once when empty); stores of live results are
+	// skipped while pinned. Drift is reported by doctor --live.
+	Pinned bool `toml:"pinned"`
+	// ToolTimeout overrides the per-RPC timeout for tool calls (seconds).
+	// Nil = daemon default (10s). 0 = default (not unlimited).
+	ToolTimeout *int `toml:"tool_timeout"`
+	// TokenHeader remaps the bearer token header upstream
+	// (e.g. "X-API-Key"). Empty = Authorization.
+	TokenHeader string `toml:"token_header"`
+	// Params restricts allowed arguments per tool:
+	// [servers.foo.params] create_issue = ["title", "body"].
+	Params map[string][]string `toml:"params"`
+	// PassthroughHeaders is an opt-in allowlist of incoming request headers
+	// forwarded upstream per-request (remote-only). Config Headers win on conflict.
+	PassthroughHeaders []string `toml:"passthrough_headers"`
 
 	// Name is the map key, set at load. ConfigError is set by validation,
 	// never by users. Server stays listed but unhealthy; daemon keeps running.
@@ -166,6 +194,15 @@ func (s ServerEntry) DeepCopy() ServerEntry {
 		v := *s.OAuth
 		out.OAuth = &v
 	}
+	if s.ToolTimeout != nil {
+		v := *s.ToolTimeout
+		out.ToolTimeout = &v
+	}
+	out.Params = maps.Clone(s.Params)
+	for k, v := range out.Params {
+		out.Params[k] = slices.Clone(v)
+	}
+	out.PassthroughHeaders = slices.Clone(s.PassthroughHeaders)
 	if s.IdleTimeout != nil {
 		v := *s.IdleTimeout
 		out.IdleTimeout = &v
@@ -320,6 +357,10 @@ type OAuthConfig struct {
 	Flow        string `toml:"flow"`       // browser (default) | device | token
 	GrantType   string `toml:"grant_type"` // "" or "client_credentials"
 	Timeout     int    `toml:"timeout"`    // device poll cap, seconds (default 300)
+	// Discovery overrides for broken environments: empty = RFC 8414 auto-discover.
+	AuthorizationURL string `toml:"authorization_url"`
+	TokenURL         string `toml:"token_url"`
+	RegistrationURL  string `toml:"registration_url"`
 }
 
 // ToolsPolicy filters a server's tools (C1). Glob lists (* and ?, same engine
@@ -372,6 +413,9 @@ func Load(dir string) (*Config, error) {
 		}
 		s.ConfigError = validateServer(&s)
 		cfg.Servers[name] = s
+	}
+	if cfg.Groups == nil {
+		cfg.Groups = map[string]GroupEntry{}
 	}
 	return &cfg, nil
 }
@@ -493,6 +537,37 @@ func validateServer(s *ServerEntry) string {
 				return fmt.Sprintf("server %q: tools.deny[%d] must not be empty", s.Name, i)
 			}
 		}
+	}
+	switch s.NewTools {
+	case "", "expose", "hide":
+	default:
+		return fmt.Sprintf("server %q: new_tools must be expose|hide or empty", s.Name)
+	}
+	if s.ToolTimeout != nil && *s.ToolTimeout < 0 {
+		return fmt.Sprintf("server %q: tool_timeout must be >= 0", s.Name)
+	}
+	if s.TokenHeader != "" {
+		if strings.TrimSpace(s.TokenHeader) == "" || strings.ContainsAny(s.TokenHeader, "\r\n:") {
+			return fmt.Sprintf("server %q: bad token_header %q", s.Name, s.TokenHeader)
+		}
+	}
+	for tool, params := range s.Params {
+		if strings.TrimSpace(tool) == "" {
+			return fmt.Sprintf("server %q: params has empty tool name", s.Name)
+		}
+		for i, p := range params {
+			if strings.TrimSpace(p) == "" {
+				return fmt.Sprintf("server %q: params.%s[%d] must not be empty", s.Name, tool, i)
+			}
+		}
+	}
+	for i, h := range s.PassthroughHeaders {
+		if strings.TrimSpace(h) == "" || strings.ContainsAny(h, "\r\n:") {
+			return fmt.Sprintf("server %q: passthrough_headers[%d] must not be empty", s.Name, i)
+		}
+	}
+	if len(s.PassthroughHeaders) != 0 && s.URL == "" {
+		return fmt.Sprintf("server %q: passthrough_headers is remote-only", s.Name)
 	}
 	switch s.Lifecycle {
 	case "", "lazy", "eager", "keep-alive", "lazy-keep-alive":

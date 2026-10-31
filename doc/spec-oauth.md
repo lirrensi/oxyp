@@ -242,6 +242,27 @@ prompts, call) with client reset. All set `auth_required` health and HTTP
 
 Verification: `V-OAUTH-007`.
 
+### Requirement: Discovery URL overrides
+
+`oauth.authorization_url` overrides the RFC 8414 metadata URL for the browser
+handler (`AuthServerMetadataURL`) and the device / client-credentials discovery
+helpers (variadic override; empty = `<issuer>/.well-known/oauth-authorization-server`).
+`oauth.token_url` / `oauth.registration_url` are config surface for broken
+environments (expanded like other oauth fields, fail-closed on unset vars);
+the browser flow honors the metadata-URL override, device/CC flows honor it
+for metadata fetch. Misconfigured URLs fail the login with the fetch error —
+never silent fallback, never daemon-wide impact.
+
+#### Scenario: Broken discovery still logs in
+
+- **GIVEN** an IdP whose well-known path 404s but serves metadata at a custom URL
+- **WHEN** `oauth.authorization_url` points at the custom URL and login runs
+- **THEN** discovery succeeds and the token saves.
+
+*Definition of Done: If discovery ignores the override, the system is broken.*
+
+Verification: `V-OAUTH-008` (new: override unit on device/CC discovery).
+
 ## Data Contracts
 
 ### Token file (`<key>.json`)

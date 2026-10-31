@@ -28,9 +28,12 @@ type ClientCredentialsMetadata struct {
 }
 
 // DiscoverClientCredentialsMetadata fetches RFC 8414 metadata from the issuer
-// derived from the MCP URL.
-func DiscoverClientCredentialsMetadata(ctx context.Context, httpClient *http.Client, issuer string) (*ClientCredentialsMetadata, error) {
+// derived from the MCP URL. metadataURL overrides the well-known URL.
+func DiscoverClientCredentialsMetadata(ctx context.Context, httpClient *http.Client, issuer string, metadataURL ...string) (*ClientCredentialsMetadata, error) {
 	wellKnown := strings.TrimSuffix(issuer, "/") + "/.well-known/oauth-authorization-server"
+	if len(metadataURL) > 0 && strings.TrimSpace(metadataURL[0]) != "" {
+		wellKnown = strings.TrimSpace(metadataURL[0])
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", wellKnown, nil)
 	if err != nil {
 		return nil, err

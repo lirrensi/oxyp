@@ -89,9 +89,16 @@ func Fingerprint(s config.ServerEntry) string {
 	}
 	if s.OAuth != nil {
 		// secret excluded: same endpoint+client ⇒ same tools
-		fmt.Fprintf(&b, "\x06%s|%s|%d|%s|%d", s.OAuth.ClientID,
-			s.OAuth.Scope, s.OAuth.CallbackPort, s.OAuth.Flow, s.OAuth.Timeout)
+		fmt.Fprintf(&b, "\x06%s|%s|%d|%s|%d|%s|%s|%s", s.OAuth.ClientID,
+			s.OAuth.Scope, s.OAuth.CallbackPort, s.OAuth.Flow, s.OAuth.Timeout,
+			s.OAuth.AuthorizationURL, s.OAuth.TokenURL, s.OAuth.RegistrationURL)
 	}
+	hide := s.NewTools == "hide"
+	timeout := 0
+	if s.ToolTimeout != nil && *s.ToolTimeout > 0 {
+		timeout = *s.ToolTimeout
+	}
+	fmt.Fprintf(&b, "\x07hide=%v|timeout=%d", hide, timeout)
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:16])
 }
