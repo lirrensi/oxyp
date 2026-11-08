@@ -107,10 +107,18 @@ and verifies it runs:
 curl -fsSL https://raw.githubusercontent.com/lirrensi/oxyp/main/install.sh | sh
 ```
 
-Open a new shell and `oxyp` is ready to go. Options (passed through the pipe):
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/lirrensi/oxyp/main/install.ps1 | iex
+```
+
+Open a new shell and `oxyp` is ready to go. sh options (passed through the pipe):
 `sh -s -- --go` builds from source via `go install` instead of downloading;
 `--version v0.3.0` pins a release; `--dir DIR` overrides the install dir.
 No prebuilt binary for your platform? Use `--go` (needs Go 1.21+).
+ps1 options (`-Go`, `-Version`, `-Dir`) need the script on disk — `iex` can't
+take args, so download it first (see the header comment).
 
 Prefer to do it by hand? `go install` drops the binary in `~/go/bin` — point
 `GOBIN` at a dir already on your PATH:
