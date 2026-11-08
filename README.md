@@ -30,7 +30,7 @@
 
 ## What is oxyp?
 
-oxyp is a **client-agnostic gateway** between your agents and your MCP servers. Instead of wiring N servers into every client — and paying full schema spam on every turn — each client gets **one stdio shim** with 5 static meta-tools. A localhost **daemon** owns every downstream connection and wakes it only when called.
+oxyp or oxy-p is a **client-agnostic gateway** between your agents and your MCP servers. Instead of wiring N servers into every client — and paying full schema spam on every turn — each client gets **one stdio shim** with 5 static meta-tools. A localhost **daemon** owns every downstream connection and wakes it only when called.
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -100,13 +100,20 @@ MCP shim (any client, one `{command: oxyp, args: [shim]}` line), CLI (`servers /
 ---
 ## Install — one copy-paste
 
-Prerequisite: Go 1.21+ (the toolchain auto-upgrades to whatever oxyp needs).
+No Go toolchain? Grab a binary (linux/darwin amd64+arm64, windows amd64 —
+built by CI on every push):
+
+```bash
+curl -fsSL -o oxyp https://github.com/lirrensi/oxyp/releases/latest/download/oxyp-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && chmod +x oxyp && sudo mv oxyp /usr/local/bin/
+```
+
+Got Go 1.21+ (the toolchain auto-upgrades to whatever oxyp needs)?
 
 ```bash
 go install github.com/lirrensi/oxyp/cmd/oxyp@latest
 ```
 
-One static binary on your PATH. No runtime, no keychain, no machine-bound state. `oxyp` + `oxyp.toml` runs your agent anywhere.
+One static binary on your PATH either way. No runtime, no keychain, no machine-bound state. `oxyp` + `oxyp.toml` runs your agent anywhere.
 
 ```bash
 oxyp servers                                        # autostarts the daemon; empty for now
@@ -184,6 +191,31 @@ same URL/addr under your token, the CLI/shim just attaches instead of
 spawning a second copy. `stop` refuses adopted daemons (`already
 running elsewhere`) — stop it where it lives.
 
+## Federation: mount other daemons as servers
+
+Auth lives where it was earned — your Win box has the GitHub token, WSL has
+Linear, and neither can move. Peering mounts the other daemon's servers as
+your own; calls proxy to the owner (which re-runs its gates), tokens never
+travel:
+
+```bash
+oxyp peers add http://192.168.1.5:8379 --write   # handshake, preview, write [peers.<name>]
+oxyp servers                                      # their servers appear merged with yours
+oxyp call gamma run_query '{}'                    # runs on the owner, output streams back
+```
+
+Naming: merge mode (default) floats shared names to the priority winner
+(local rank 0 beats peers unless outbid); every claimant stays reachable
+qualified (`wsl:db`), peer-beaten locals via `local:db`. Namespace mode
+(`mode = "namespace"`) claims no bare names — five GitLabs, zero collision.
+Transitives compose by prefixing (`b:c:gamma`) when both sides opt in (owner
+`[servers.x.peer_export] transitive = true` + middle
+`[daemon.peer_sharing] mode = "show"`).
+
+Trust: peers hold your operator bearer token — sharing controls what
+auto-mounts, not a vault door. If you wouldn't hand a daemon your token,
+don't peer with it. Full contract: [doc/spec-federation.md](doc/spec-federation.md).
+
 ## CLI cheat sheet
 
 | Command | What it does |
@@ -198,6 +230,8 @@ running elsewhere`) — stop it where it lives.
 | `oxyp add <url> [--name] [--write]` | probe a URL + append a server entry |
 | `oxyp import [--from …] [--write]` | convert cursor/claude/vscode/opencode/omp configs |
 | `oxyp login <server>` | OAuth login (browser/device/token per config) |
+| `oxyp peers add <url> [--as/--token/--mode] [--write]` | handshake + append a peer entry |
+| `oxyp peers list` / `remove <name>` / `sync` | view, cut, or resync peer mounts |
 | `oxyp reload` | re-read config (or `kill -HUP`) |
 | `oxyp refresh <server>` | force live re-fetch, replace the pin/hide snapshot (shows added/removed) |
 | `oxyp stop` | stop the daemon (idempotent) |
@@ -283,6 +317,7 @@ Never guess schemas — describe first.
 - [HTTP + shim](doc/spec-http-shim.md) — API, shim, media passthrough
 - [guard/secrets/config](doc/spec-guard.md) — output guard, trace, secrets
 - [CLI](doc/spec-cli.md) — every command, every flag
+- [federation](doc/spec-federation.md) — peer daemons, virtual servers, sharing
 - [clients](doc/CLIENTS.md) — opencode / omp / hermes attach notes
 - [stances](doc/PHILOSOPHY.md) — what oxyp refuses to do, and why
 
@@ -296,6 +331,10 @@ Clean rewrite, no fork — but the good ideas are borrowed with love:
 ## Contributing
 
 Issues and PRs welcome. Keep it boring, keep it portable: single binary, no keychain, no machine-bound state.
+
+## Why its Oxy-p, why oxy if its not in rust?!
+
+It started in rust! 10 min in I evaluated my entire life and found out I am not ready to become a femboy yet so I reconsidered.
 
 ## License
 
