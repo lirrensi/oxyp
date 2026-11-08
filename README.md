@@ -1,7 +1,7 @@
 # oxyp
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.0-blueviolet?style=flat-square" alt="Version 0.2.0" />
+  <img src="https://img.shields.io/badge/version-0.3.0-blueviolet?style=flat-square" alt="Version 0.3.0" />
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License" />
   <img src="https://img.shields.io/github/go-mod/go-version/lirrensi/oxyp?style=flat-square" alt="Go version" />
   <img src="https://img.shields.io/badge/mcp-stdio%2Bhttp-success?style=flat-square" alt="MCP stdio+http" />

@@ -21,7 +21,7 @@ import (
 // blocks verbatim (media passthrough). Group scoping comes from the OXYP_GROUP
 // env or ?group= — see gatewayGroup.
 func (s *Server) mcpGateway() *mcpserver.MCPServer {
-	gw := mcpserver.NewMCPServer("oxyp", "0.2.0",
+	gw := mcpserver.NewMCPServer("oxyp", "0.3.0",
 		mcpserver.WithInstructions("oxyp lazy MCP gateway: search_tools → describe_tool → call. Schemas on demand, never guess."),
 		mcpserver.WithToolCapabilities(false),
 	)
