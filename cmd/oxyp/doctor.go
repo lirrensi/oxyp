@@ -78,6 +78,17 @@ func runDoctorOffline(cfg *config.Config, asJSON bool) error {
 			results = append(results, doctorResult{Name: name, Status: "ok", Detail: doctorKind(e)})
 		}
 	}
+	for _, pn := range sortedPeers(cfg) {
+		pe := cfg.Peers[pn]
+		switch {
+		case !pe.IsEnabled():
+			results = append(results, doctorResult{Name: "peer:" + pn, Status: "disabled", Detail: "skipped (enabled = false)"})
+		case pe.ConfigError != "":
+			results = append(results, doctorResult{Name: "peer:" + pn, Status: "failed", Detail: "config: " + pe.ConfigError})
+		default:
+			results = append(results, doctorResult{Name: "peer:" + pn, Status: "ok", Detail: "peer " + pe.URL + " (" + pe.ModeOr() + ")"})
+		}
+	}
 	for _, g := range sortedGroups(cfg) {
 		missing := groupMissing(cfg, g)
 		if len(missing) == 0 {
@@ -89,6 +100,15 @@ func runDoctorOffline(cfg *config.Config, asJSON bool) error {
 	}
 	printDoctor(results, false, asJSON)
 	return doctorExit(results)
+}
+
+func sortedPeers(cfg *config.Config) []string {
+	out := make([]string, 0, len(cfg.Peers))
+	for n := range cfg.Peers {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func sortedGroups(cfg *config.Config) []string {
@@ -195,6 +215,60 @@ func runDoctorLive(dir string, cfg *config.Config, asJSON bool) error {
 	// New, so they are reported without probing.
 	d := daemon.NewWithOAuthDir(cfg, nil, doctorOAuthDir(dir))
 	defer d.Close()
+
+	// Peers mount live. Budget: one per-peer slice (daemon gives each peer
+	// 15s; doctor sizes the parent so the last peer isn't starved by the
+	// earlier ones).
+	syncable := 0
+	for _, pe := range cfg.Peers {
+		if pe.IsEnabled() && pe.ConfigError == "" {
+			syncable++
+		}
+	}
+	parent := liveBudget
+	if syncable > 1 {
+		parent = time.Duration(syncable) * liveBudget
+	}
+	lctx, lcancel := context.WithTimeout(context.Background(), parent)
+	d.SyncPeers(lctx)
+	lcancel()
+	// Rows come from CONFIG (like offline), live status overlaid — a
+	// disabled/config-broken peer must appear here too, or --live exits
+	// green on a broken mount.
+	live := map[string]daemon.PeerStatus{}
+	for _, st := range d.PeerStatuses() {
+		live[st.Name] = st
+	}
+	for _, pn := range sortedPeers(cfg) {
+		pe := cfg.Peers[pn]
+		switch {
+		case !pe.IsEnabled():
+			results = append(results, doctorResult{Name: "peer:" + pn, Status: "disabled", Detail: "skipped (enabled = false)"})
+			continue
+		case pe.ConfigError != "":
+			results = append(results, doctorResult{Name: "peer:" + pn, Status: "failed", Detail: "config: " + pe.ConfigError})
+			continue
+		}
+		st, ok := live[pn]
+		if !ok {
+			results = append(results, doctorResult{Name: "peer:" + pn, Status: "failed", Detail: "not mounted (sync skipped?)"})
+			continue
+		}
+		switch {
+		case st.Error != "":
+			results = append(results, doctorResult{Name: "peer:" + pn, Status: "failed", Detail: "config: " + st.Error})
+		case st.Down != "":
+			results = append(results, doctorResult{Name: "peer:" + pn, Status: "failed", Detail: st.Down})
+		default:
+			detail := fmt.Sprintf("peer %s (%s, %d servers)", st.URL, st.Mode, st.Servers)
+			if len(st.Instance) >= 8 {
+				detail += " [" + st.Instance[:8] + "]"
+			} else if st.Instance != "" {
+				detail += " [" + st.Instance + "]"
+			}
+			results = append(results, doctorResult{Name: "peer:" + pn, Status: "ok", Tools: st.Servers, Detail: detail})
+		}
+	}
 
 	for _, name := range names {
 		e := cfg.Servers[name]

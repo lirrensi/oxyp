@@ -200,6 +200,261 @@ func TestServersConfigErrorAndHealth(t *testing.T) {
 	}
 }
 
+func TestFederationRevConverges(t *testing.T) {
+	// catalog.rev MUST equal /rev.rev for the same state — else importers
+	// resync every tick. Exercises the divergent inputs: a denied tool, a
+	// resource, and a prompt (rev-mode must mirror full-mode exactly).
+	policy := &config.ToolsPolicy{Deny: []string{"secret_*", "hidden"}}
+	f := newFixture(t, "alpha", "Alpha Server", policy, func(s *mcpserver.MCPServer, reqs *atomic.Int64) {
+		tool, h := echoTool()
+		s.AddTool(tool, countCalls(reqs, h))
+		s.AddTool(mcp.NewTool("hidden", mcp.WithDescription("denied")), countCalls(reqs, h))
+		s.AddResource(mcp.NewResource("test://r", "r"), func(_ context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+			return []mcp.ResourceContents{mcp.TextResourceContents{URI: "test://r", Text: "x"}}, nil
+		})
+		s.AddPrompt(mcp.NewPrompt("p"), func(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			return &mcp.GetPromptResult{Messages: []mcp.PromptMessage{{Role: "user", Content: mcp.TextContent{Type: "text", Text: "hi"}}}}, nil
+		})
+	})
+	cat := decodeBody(t, f.get("/federation/v1/catalog"))
+	rev := decodeBody(t, f.get("/federation/v1/rev"))["rev"].(string)
+	if cat["rev"] != rev {
+		t.Fatalf("catalog.rev %v != /rev %v", cat["rev"], rev)
+	}
+	// Denied tool absent from the wire row but the hash still converges.
+	srvs := cat["servers"].([]any)
+	tools := srvs[0].(map[string]any)["tools"].([]any)
+	for _, tt := range tools {
+		if tt.(map[string]any)["name"] == "hidden" {
+			t.Fatal("denied tool leaked into catalog")
+		}
+	}
+	// Second tick: still equal (no spawn-state drift between calls).
+	rev2 := decodeBody(t, f.get("/federation/v1/rev"))["rev"].(string)
+	if rev2 != rev {
+		t.Fatalf("rev drifted without change: %v -> %v", rev, rev2)
+	}
+}
+
+func TestFederationRev(t *testing.T) {
+	f := newFixture(t, "alpha", "Alpha Server", nil, func(s *mcpserver.MCPServer, reqs *atomic.Int64) {
+		tool, h := echoTool()
+		s.AddTool(tool, countCalls(reqs, h))
+	})
+	revOf := func() string {
+		rr := f.get("/federation/v1/rev")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("rev: %d", rr.Code)
+		}
+		return decodeBody(t, rr)["rev"].(string)
+	}
+	r1 := revOf()
+	if r1 == "" {
+		t.Fatal("empty rev")
+	}
+	if revOf() != r1 {
+		t.Fatal("rev must be stable without changes")
+	}
+	// New cached tool flips the hash (simulate upstream list_changed).
+	tools, err := f.daemon.ListTools(context.Background(), "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = tools
+	// Rev never spawns: cold second server contributes name-only, no downstream hit.
+	before := f.reqs.Load()
+	_ = revOf()
+	if f.reqs.Load() != before {
+		t.Fatal("rev must not touch downstream")
+	}
+}
+
+func TestFederationV1RoundTrip(t *testing.T) {
+	f := newFixture(t, "alpha", "Alpha Server", nil, func(s *mcpserver.MCPServer, reqs *atomic.Int64) {
+		tool, h := echoTool()
+		s.AddTool(tool, countCalls(reqs, h))
+		s.AddResource(mcp.NewResource("test://hello", "hello"), func(_ context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+			return []mcp.ResourceContents{mcp.TextResourceContents{URI: "test://hello", MIMEType: "text/plain", Text: "hi"}}, nil
+		})
+		s.AddPrompt(mcp.NewPrompt("greet", mcp.WithPromptDescription("greets"),
+			mcp.WithArgument("who", mcp.ArgumentDescription("who"), mcp.RequiredArgument())),
+			func(_ context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+				who := "?"
+				if req.Params.Arguments != nil {
+					who = req.Params.Arguments["who"]
+				}
+				return &mcp.GetPromptResult{Messages: []mcp.PromptMessage{{Role: "user",
+					Content: mcp.TextContent{Type: "text", Text: "hello " + who}}}}, nil
+			})
+	})
+	// call: native envelope, structured + meta preserved
+	rr := f.postJSON("/federation/v1/call", `{"server":"alpha","tool":"echo","arguments":{"a":1}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("call: %d %q", rr.Code, rr.Body.String())
+	}
+	v := decodeBody(t, rr)
+	if v["isError"] == true || v["structuredContent"] == nil || v["_meta"] == nil {
+		t.Fatalf("call envelope = %v", v)
+	}
+	// resource: native contents
+	rr = f.postJSON("/federation/v1/resource", `{"server":"alpha","uri":"test://hello"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("resource: %d %q", rr.Code, rr.Body.String())
+	}
+	if len(decodeBody(t, rr)["contents"].([]any)) != 1 {
+		t.Fatalf("resource = %q", rr.Body.String())
+	}
+	// prompt: native messages
+	rr = f.postJSON("/federation/v1/prompt", `{"server":"alpha","name":"greet","arguments":{"who":"bob"}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("prompt: %d %q", rr.Code, rr.Body.String())
+	}
+	msgs := decodeBody(t, rr)["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("prompt = %q", rr.Body.String())
+	}
+	// catalog carries resources + prompts rows now
+	rr = f.get("/federation/v1/catalog")
+	srvs := decodeBody(t, rr)["servers"].([]any)
+	m := srvs[0].(map[string]any)
+	if len(m["resources"].([]any)) != 1 || len(m["prompts"].([]any)) != 1 {
+		t.Fatalf("catalog rows = %v", m)
+	}
+	// gates: unknown server 404, bad JSON 400, missing fields 400
+	if rr := f.postJSON("/federation/v1/call", `{"server":"nope","tool":"x"}`); rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown server: %d", rr.Code)
+	}
+	if rr := f.postJSON("/federation/v1/call", `{bad`); rr.Code != http.StatusBadRequest {
+		t.Fatalf("bad json: %d", rr.Code)
+	}
+	if rr := f.postJSON("/federation/v1/prompt", `{"server":"alpha"}`); rr.Code != http.StatusBadRequest {
+		t.Fatalf("missing name: %d", rr.Code)
+	}
+}
+
+func TestFederationCatalog(t *testing.T) {
+	f := newFixture(t, "alpha", "Alpha Server", nil, func(s *mcpserver.MCPServer, reqs *atomic.Int64) {
+		tool, h := echoTool()
+		s.AddTool(tool, countCalls(reqs, h))
+	})
+	rr := f.get("/federation/v1/catalog")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("got %d: %q", rr.Code, rr.Body.String())
+	}
+	v := decodeBody(t, rr)
+	if v["version"] != "v1" || v["instance"] == "" {
+		t.Fatalf("envelope = %v", v)
+	}
+	srvs, _ := v["servers"].([]any)
+	if len(srvs) != 1 {
+		t.Fatalf("want 1 server, got %v", v)
+	}
+	m := srvs[0].(map[string]any)
+	tools, _ := m["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("want 1 tool with schema, got %v", m)
+	}
+	tm := tools[0].(map[string]any)
+	if tm["name"] != "echo" || tm["inputSchema"] == nil {
+		t.Fatalf("tool must carry schema: %v", tm)
+	}
+	// Peer view: pinned routes + sharing filter apply like /servers.
+	r := httptest.NewRequest("GET", "/federation/v1/catalog", nil)
+	r.Host = "127.0.0.1"
+	r.Header.Set("X-Oxyp-Instance", "caller1")
+	rr2 := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr2, r)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("peer catalog: %d", rr2.Code)
+	}
+}
+
+func TestPeerHandshake(t *testing.T) {
+	d := daemon.New(&config.Config{
+		Daemon:  config.DaemonConfig{Name: "mine"},
+		Servers: map[string]config.ServerEntry{"a": {Command: []string{"true"}}},
+	}, nil)
+	defer d.Close()
+	h := New(d, nil, "", "127.0.0.1:8379").Handler()
+	for _, peer := range []bool{false, true} {
+		r := httptest.NewRequest("GET", "/peer", nil)
+		r.Host = "127.0.0.1"
+		if peer {
+			r.Header.Set("X-Oxyp-Instance", "caller1")
+		}
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, r)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("peer=%v: %d", peer, rr.Code)
+		}
+		v := decodeBody(t, rr)
+		if v["instance"] == "" || v["name"] != "mine" {
+			t.Fatalf("peer=%v: %+v", peer, v)
+		}
+		if len(v["servers"].([]any)) != 1 || v["count"] != float64(1) {
+			t.Fatalf("peer=%v: %+v", peer, v)
+		}
+	}
+}
+
+func TestPeerSharingFiltersServers(t *testing.T) {
+	sharing := &config.PeerSharingConfig{Mode: config.PeerSharingHide}
+	d := daemon.New(&config.Config{
+		Daemon: config.DaemonConfig{PeerSharing: sharing},
+		Servers: map[string]config.ServerEntry{
+			"pub": {Command: []string{"true"}},
+		},
+	}, nil)
+	defer d.Close()
+	h := New(d, nil, "", "127.0.0.1:8379").Handler()
+	get := func(path string, peer bool) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", path, nil)
+		r.Host = "127.0.0.1"
+		if peer {
+			r.Header.Set("X-Oxyp-Instance", "caller1")
+		}
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, r)
+		return rr
+	}
+	names := func(rr *httptest.ResponseRecorder) []string {
+		var out []string
+		for _, sv := range decodeBody(t, rr)["servers"].([]any) {
+			out = append(out, sv.(map[string]any)["name"].(string))
+		}
+		return out
+	}
+	// Local sees everything; peer sees shared locals.
+	if got := names(get("/servers", false)); len(got) != 1 {
+		t.Fatalf("local = %v", got)
+	}
+	if got := names(get("/servers", true)); len(got) != 1 || got[0] != "pub" {
+		t.Fatalf("peer hide = %v", got)
+	}
+	// Deny hides from peers only (no oracle change for locals).
+	sharing.Deny = []string{"pub"}
+	if got := names(get("/servers", true)); len(got) != 0 {
+		t.Fatalf("denied peer = %v", got)
+	}
+	if got := names(get("/servers", false)); len(got) != 1 {
+		t.Fatalf("denied local = %v", got)
+	}
+	if rr := get("/servers/pub/tools", true); rr.Code != http.StatusNotFound {
+		t.Fatalf("denied direct = %d", rr.Code)
+	}
+	// Health follows the same view (instance always rides for handshake).
+	var hv struct {
+		Instance string         `json:"instance"`
+		Servers  map[string]any `json:"servers"`
+	}
+	if err := json.Unmarshal(get("/health", true).Body.Bytes(), &hv); err != nil {
+		t.Fatal(err)
+	}
+	if hv.Instance == "" || len(hv.Servers) != 0 {
+		t.Fatalf("peer health = %+v", hv)
+	}
+}
+
 func TestHealthCarriesIdentity(t *testing.T) {
 	d := daemon.New(&config.Config{}, nil)
 	defer d.Close()

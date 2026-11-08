@@ -11,6 +11,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/lirrensi/oxyp/internal/outguard"
+	peerfederation "github.com/lirrensi/oxyp/internal/peerfederation"
 	"github.com/lirrensi/oxyp/internal/perms"
 )
 
@@ -125,12 +126,22 @@ func (s *Server) gwListServers(ctx context.Context, req mcp.CallToolRequest) (*m
 		}
 	}
 	type info struct {
-		Name string `json:"name"`
-		Desc string `json:"description"`
+		Name     string   `json:"name"`
+		Desc     string   `json:"description"`
+		Origin   string   `json:"origin,omitempty"`
+		Shadowed []string `json:"shadowed,omitempty"`
+	}
+	peerView := peerfederation.IsPeer(ctx)
+	names := s.d.Names()
+	if peerView {
+		names = s.d.PeerNames()
 	}
 	var out []info
-	for _, name := range s.d.Names() {
+	for _, name := range names {
 		if !s.d.InGroup(group, name) {
+			continue
+		}
+		if peerView && !s.d.SharedWithPeer(name) {
 			continue
 		}
 		e := s.d.Entry(name)
@@ -141,7 +152,11 @@ func (s *Server) gwListServers(ctx context.Context, req mcp.CallToolRequest) (*m
 			!strings.Contains(strings.ToLower(e.Description), filter) {
 			continue
 		}
-		out = append(out, info{name, e.Description})
+		origin := "local"
+		if e.Peer != "" {
+			origin = e.Peer
+		}
+		out = append(out, info{name, e.Description, origin, s.d.Shadows(name)})
 	}
 	if out == nil {
 		out = []info{}
@@ -168,7 +183,7 @@ func (s *Server) gwListTools(ctx context.Context, req mcp.CallToolRequest) (*mcp
 		}
 	}
 	e := s.d.Entry(srv)
-	if e == nil {
+	if e == nil || (peerfederation.IsPeer(ctx) && !s.d.SharedWithPeer(srv)) {
 		return s.gwErr(fmt.Errorf("server not found: %q", srv))
 	}
 	tools, err := s.d.ListTools(ctx, srv)
@@ -203,7 +218,7 @@ func (s *Server) gwDescribe(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		return s.gwErr(fmt.Errorf("server %q not in group %q", srv, group))
 	}
 	e := s.d.Entry(srv)
-	if e == nil {
+	if e == nil || (peerfederation.IsPeer(ctx) && !s.d.SharedWithPeer(srv)) {
 		return s.gwErr(fmt.Errorf("server not found: %q", srv))
 	}
 	var names []string
@@ -256,14 +271,21 @@ func (s *Server) gwSearch(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 		}
 	}
 	srv := gwStr(args, "server")
+	if peerfederation.IsPeer(ctx) && srv != "" && !s.d.SharedWithPeer(srv) {
+		return s.gwErr(fmt.Errorf("server not found: %q", srv))
+	}
 	regex, _ := args["regex"].(bool)
 	hits, total, next, err := s.d.SearchTools(srv, q, regex, gwNum(args, "limit"), gwNum(args, "offset"))
 	if err != nil {
 		return s.gwErr(err)
 	}
+	peerView := peerfederation.IsPeer(ctx)
 	out := []map[string]any{}
 	for _, h := range hits {
 		if !s.d.InGroup(group, h.Server) {
+			continue
+		}
+		if peerView && !s.d.SharedWithPeer(h.Server) {
 			continue
 		}
 		out = append(out, map[string]any{
@@ -287,7 +309,7 @@ func (s *Server) gwCall(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 		return s.gwErr(fmt.Errorf("server %q not in group %q", srv, group))
 	}
 	e := s.d.Entry(srv)
-	if e == nil {
+	if e == nil || (peerfederation.IsPeer(ctx) && !s.d.SharedWithPeer(srv)) {
 		return s.gwErr(fmt.Errorf("server not found: %q", srv))
 	}
 	if dec := perms.Resolve(e, tool); dec.Action != "allow" {

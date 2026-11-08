@@ -21,6 +21,7 @@
 package meta
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/lirrensi/oxyp/internal/daemon"
 	"github.com/lirrensi/oxyp/internal/outguard"
+	peerfederation "github.com/lirrensi/oxyp/internal/peerfederation"
 	"github.com/lirrensi/oxyp/internal/perms"
 	"github.com/lirrensi/oxyp/internal/redact"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -62,9 +64,26 @@ func New(d *daemon.Daemon, reload func() (added, removed, modified []string, err
 	s.mux.HandleFunc("GET /servers/{name}/prompts", s.handleListPrompts)
 	s.mux.HandleFunc("GET /tools", s.handleSearch)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+	s.mux.HandleFunc("GET /peer", s.handlePeer)
+	s.mux.HandleFunc("GET /federation/v1/catalog", s.handleFederationCatalog)
+	s.mux.HandleFunc("GET /federation/v1/rev", s.handleFederationRev)
+	s.mux.HandleFunc("POST /federation/v1/call", s.handleFederationCall)
+	s.mux.HandleFunc("POST /federation/v1/resource", s.handleFederationResource)
+	s.mux.HandleFunc("POST /federation/v1/prompt", s.handleFederationPrompt)
+	s.mux.HandleFunc("POST /federation/v1/complete", s.handleFederationComplete)
 	s.mux.HandleFunc("POST /reload", s.handleReload)
 	s.mux.HandleFunc("POST /servers/{name}/refresh", s.handleRefresh)
-	s.mux.Handle("POST /mcp", mcpserver.NewStreamableHTTPServer(s.mcpGateway()))
+	s.mux.Handle("POST /mcp", mcpserver.NewStreamableHTTPServer(s.mcpGateway(),
+		mcpserver.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
+			// Federation chain for /mcp calls (REST gets it in Handler).
+			if chain := peerfederation.InboundChain(r); len(chain) != 0 {
+				ctx = peerfederation.WithVisited(ctx, chain)
+			}
+			if peerfederation.IsPeerRequest(r) {
+				ctx = peerfederation.WithPeer(ctx)
+			}
+			return ctx
+		})))
 	return s
 }
 
@@ -94,6 +113,19 @@ func (s *Server) Handler() http.Handler {
 				writeErr(w, http.StatusUnsupportedMediaType, "state-changing requests require application/json")
 				return
 			}
+		}
+		// Federation loop guard: refuse requests that already visited us
+		// (A→B→A) or exhausted the hop budget. Runs after auth so peers
+		// authenticate first; /health stays reachable (peer handshake).
+		if chain := peerfederation.InboundChain(r); len(chain) != 0 && r.URL.Path != "/health" {
+			if peerfederation.CheckLoop(s.d.InstanceID(), chain) {
+				writeErr(w, http.StatusLoopDetected, "federation loop refused")
+				return
+			}
+			r = r.WithContext(peerfederation.WithVisited(r.Context(), chain))
+		}
+		if peerfederation.IsPeerRequest(r) {
+			r = r.WithContext(peerfederation.WithPeer(r.Context()))
 		}
 		s.mux.ServeHTTP(w, r)
 	})
@@ -178,13 +210,16 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 }
 
 type serverInfo struct {
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-	Instructions string `json:"instructions,omitempty"`
-	Healthy      *bool  `json:"healthy,omitempty"`
-	Error        string `json:"error,omitempty"`
-	AuthRequired string `json:"auth_required,omitempty"`
-	Connected    bool   `json:"connected"`
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	Instructions string   `json:"instructions,omitempty"`
+	Healthy      *bool    `json:"healthy,omitempty"`
+	Error        string   `json:"error,omitempty"`
+	AuthRequired string   `json:"auth_required,omitempty"`
+	Connected    bool     `json:"connected"`
+	Origin       string   `json:"origin,omitempty"`
+	Shadowed     []string `json:"shadowed,omitempty"`
+	Transitive   bool     `json:"transitive,omitempty"`
 }
 
 func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
@@ -196,9 +231,19 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	peerView := peerfederation.IsPeer(r.Context())
+	names := s.d.Names()
+	if peerView {
+		// Peers get pinned routes (locals bare, virtuals canonical),
+		// not floaty merge display names.
+		names = s.d.PeerNames()
+	}
 	var out []serverInfo
-	for _, name := range s.d.Names() {
+	for _, name := range names {
 		if !s.d.InGroup(group, name) {
+			continue
+		}
+		if peerView && !s.d.SharedWithPeer(name) {
 			continue
 		}
 		e := s.d.Entry(name)
@@ -210,6 +255,16 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		info := serverInfo{Name: name, Description: e.Description}
+		if e.Peer != "" {
+			info.Origin = e.Peer
+			info.Transitive = e.PeerTransitive
+		} else {
+			info.Origin = "local"
+			info.Transitive = e.PeerExport != nil && e.PeerExport.Transitive
+		}
+		if sh := s.d.Shadows(name); len(sh) != 0 {
+			info.Shadowed = sh
+		}
 		if e.ConfigError != "" {
 			f := false
 			info.Healthy = &f
@@ -251,7 +306,7 @@ func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e := s.d.Entry(name)
-	if e == nil {
+	if e == nil || (peerfederation.IsPeer(r.Context()) && !s.d.SharedWithPeer(name)) {
 		writeErr(w, http.StatusNotFound, "server not found")
 		return
 	}
@@ -281,7 +336,7 @@ func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e := s.d.Entry(name)
-	if e == nil {
+	if e == nil || (peerfederation.IsPeer(r.Context()) && !s.d.SharedWithPeer(name)) {
 		writeErr(w, http.StatusNotFound, "server not found")
 		return
 	}
@@ -312,7 +367,7 @@ func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request) {
 // Servers without resources support return {"resources": []}.
 func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if s.d.Entry(name) == nil {
+	if s.d.Entry(name) == nil || (peerfederation.IsPeer(r.Context()) && !s.d.SharedWithPeer(name)) {
 		writeErr(w, http.StatusNotFound, "server not found")
 		return
 	}
@@ -343,7 +398,7 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 // exactly one must identify the resource.
 func (s *Server) handleReadResource(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if s.d.Entry(name) == nil {
+	if s.d.Entry(name) == nil || (peerfederation.IsPeer(r.Context()) && !s.d.SharedWithPeer(name)) {
 		writeErr(w, http.StatusNotFound, "server not found")
 		return
 	}
@@ -371,7 +426,7 @@ func (s *Server) handleReadResource(w http.ResponseWriter, r *http.Request) {
 // prompts support return {"prompts": []}.
 func (s *Server) handleListPrompts(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if s.d.Entry(name) == nil {
+	if s.d.Entry(name) == nil || (peerfederation.IsPeer(r.Context()) && !s.d.SharedWithPeer(name)) {
 		writeErr(w, http.StatusNotFound, "server not found")
 		return
 	}
@@ -416,6 +471,12 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if peerfederation.IsPeer(r.Context()) {
+		if srv := q.Get("server"); srv != "" && !s.d.SharedWithPeer(srv) {
+			writeErr(w, http.StatusNotFound, "server not found")
+			return
+		}
+	}
 	hits, total, next, err := s.d.SearchTools(
 		q.Get("server"), q.Get("q"), q.Get("regex") == "1" || q.Get("regex") == "true",
 		atoiOr(q.Get("limit"), 12), atoiOr(q.Get("offset"), 0))
@@ -423,9 +484,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	peerView := peerfederation.IsPeer(r.Context())
 	out := []map[string]any{}
 	for _, h := range hits {
 		if !s.d.InGroup(group, h.Server) {
+			continue
+		}
+		if peerView && !s.d.SharedWithPeer(h.Server) {
 			continue
 		}
 		out = append(out, map[string]any{
@@ -460,7 +525,7 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	e := s.d.Entry(name)
-	if e == nil {
+	if e == nil || (peerfederation.IsPeer(r.Context()) && !s.d.SharedWithPeer(name)) {
 		writeErr(w, http.StatusNotFound, "server not found")
 		return
 	}
@@ -515,7 +580,7 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	e := s.d.Entry(name)
-	if e == nil {
+	if e == nil || (peerfederation.IsPeer(r.Context()) && !s.d.SharedWithPeer(name)) {
 		writeErr(w, http.StatusNotFound, "server not found")
 		return
 	}
@@ -546,6 +611,38 @@ func writeDownstreamErr(w http.ResponseWriter, err error) {
 		})
 		return
 	}
+	var peerAuth *peerfederation.AuthNeededError
+	if errors.As(err, &peerAuth) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":         redact.Body(err.Error()),
+			"auth_required": peerAuth.Hint + " (on " + peerAuth.Peer + ")",
+		})
+		return
+	}
+	var peerPolicy *peerfederation.PolicyDeniedError
+	if errors.As(err, &peerPolicy) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":   redact.Body(err.Error()),
+			"details": peerPolicy.Message,
+			"_meta":   map[string]string{"oxypPolicy": "blocked"},
+		})
+		return
+	}
+	var peerParam *peerfederation.ParamDeniedError
+	if errors.As(err, &peerParam) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":   redact.Body(err.Error()),
+			"allowed": peerParam.Allowed,
+			"_meta":   map[string]string{"oxypPolicy": "param-blocked"},
+		})
+		return
+	}
 	var paramErr *daemon.ParamDeniedError
 	if errors.As(err, &paramErr) {
 		w.Header().Set("Content-Type", "application/json")
@@ -562,7 +659,15 @@ func writeDownstreamErr(w http.ResponseWriter, err error) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	servers := map[string]any{}
-	for _, name := range s.d.Names() {
+	peerView := peerfederation.IsPeer(r.Context())
+	names := s.d.Names()
+	if peerView {
+		names = s.d.PeerNames()
+	}
+	for _, name := range names {
+		if peerView && !s.d.SharedWithPeer(name) {
+			continue
+		}
 		e := s.d.Entry(name)
 		if e == nil {
 			continue // concurrent reload removed it
@@ -583,7 +688,36 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		servers[name] = entry
 	}
-	writeJSON(w, map[string]any{"pid": s.pid, "startedAt": s.startedAt, "servers": servers})
+	writeJSON(w, map[string]any{"pid": s.pid, "startedAt": s.startedAt, "instance": s.d.InstanceID(), "name": s.d.DaemonName(), "servers": servers})
+}
+
+// handlePeer answers the federation handshake: who am I (name+instance),
+// what would YOU see (shared server names from the caller's view), and how
+// many tools that is. One GET replaces the probe + list + count dance for
+// `oxyp peers add`, and the same view logic as /servers (sharing filter,
+// pinned routes) so the preview matches the mount.
+func (s *Server) handlePeer(w http.ResponseWriter, r *http.Request) {
+	peerView := peerfederation.IsPeer(r.Context())
+	names := s.d.Names()
+	if peerView {
+		names = s.d.PeerNames()
+	}
+	var shared []string
+	for _, name := range names {
+		if peerView && !s.d.SharedWithPeer(name) {
+			continue
+		}
+		shared = append(shared, name)
+	}
+	if shared == nil {
+		shared = []string{}
+	}
+	writeJSON(w, map[string]any{
+		"instance": s.d.InstanceID(),
+		"name":     s.d.DaemonName(),
+		"servers":  shared,
+		"count":    len(shared),
+	})
 }
 
 func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {

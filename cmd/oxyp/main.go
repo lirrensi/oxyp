@@ -33,6 +33,7 @@ import (
 	"github.com/lirrensi/oxyp/internal/daemon"
 	"github.com/lirrensi/oxyp/internal/meta"
 	"github.com/lirrensi/oxyp/internal/oauth"
+	peerfederation "github.com/lirrensi/oxyp/internal/peerfederation"
 	"github.com/lirrensi/oxyp/internal/ptrace"
 )
 
@@ -44,7 +45,7 @@ var (
 func main() {
 	root := &cobra.Command{Use: "oxyp", Short: "one daemon, every connector"}
 	root.PersistentFlags().StringVar(&dirFlag, "dir", "", "config dir (default OXYP_DIR, XDG_CONFIG_HOME/oxyp, or ~/.oxyp)")
-	root.AddCommand(daemonCmd(), callCmd(), serversCmd(), toolsCmd(), searchCmd(), describeCmd(), statusCmd(), reloadCmd(), refreshCmd(), stopCmd(), restartCmd(), shimCmd(), loginCmd(), doctorCmd(), addCmd(), importCmd())
+	root.AddCommand(daemonCmd(), callCmd(), serversCmd(), toolsCmd(), searchCmd(), describeCmd(), statusCmd(), reloadCmd(), refreshCmd(), stopCmd(), restartCmd(), shimCmd(), loginCmd(), doctorCmd(), addCmd(), importCmd(), peersCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -162,6 +163,11 @@ func daemonCmd() *cobra.Command {
 				return err
 			}
 			d := daemon.NewWithDirs(cfg, nil, filepath.Join(dir, "oauth"), filepath.Join(dir, "cache.json"))
+			if id, ierr := peerfederation.LoadOrCreateIdentity(dir); ierr != nil {
+				return fmt.Errorf("identity: %w", ierr)
+			} else {
+				d.SetInstanceID(id)
+			}
 			if traceEnabled(cfg) {
 				path := filepath.Join(dir, "trace.jsonl")
 				maxBytes, maxEvents := 0, 0
@@ -197,6 +203,7 @@ func daemonCmd() *cobra.Command {
 					fmt.Fprintf(os.Stderr, "oxyp: daemon addr/token changed — restart required (reload keeps %q)\n", startAddr)
 				}
 				a, r, m = d.Reload(ncfg)
+				go d.SyncPeers(context.Background())
 				return a, r, m, nil
 			}
 			ms := meta.New(d, reload, cfg.Daemon.Token, cfg.Daemon.Addr)
@@ -237,6 +244,7 @@ func daemonCmd() *cobra.Command {
 			}
 			defer os.Remove(endpointPath())
 			defer d.Close()
+			go d.SyncPeers(ctx)
 			go d.EagerStart(ctx)
 			go d.PingLoop(ctx)
 			go d.SweepLoop(ctx)
@@ -820,6 +828,13 @@ func loginCmd() *cobra.Command {
 			cfg, err := config.Load(dir)
 			if err != nil {
 				return err
+			}
+			if peer, rest, ok := strings.Cut(args[0], ":"); ok {
+				if peer == "local" {
+					args[0] = rest
+				} else {
+					return fmt.Errorf("server %q lives on peer %q: log in there (auth never leaves its owner)", args[0], peer)
+				}
 			}
 			entry, ok := cfg.Servers[args[0]]
 			if !ok {

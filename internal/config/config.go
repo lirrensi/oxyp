@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -40,6 +41,7 @@ type Config struct {
 	Daemon  DaemonConfig           `toml:"daemon"`
 	Servers map[string]ServerEntry `toml:"servers"`
 	Groups  map[string]GroupEntry  `toml:"groups"`
+	Peers   map[string]PeerEntry   `toml:"peers"`
 }
 
 // GroupEntry is a named subset of servers (curated view).
@@ -61,10 +63,62 @@ type DaemonConfig struct {
 	// IdleTimeout is minutes before an idle stdio child is stopped.
 	// Default 10. 0 = never. Per-server idle_timeout overrides.
 	IdleTimeout *int `toml:"idle_timeout"`
+	// Name is this daemon's advertised federation name ("": anonymous).
+	// Peers display and address it by this; instance id stays the identity.
+	Name string `toml:"name"`
 	// OutputGuard caps inline text results (spill to 0600 file). Nil = off.
 	OutputGuard *OutputGuardConfig `toml:"output_guard"`
 	// Trace enables metadata-only JSONL tracing. Nil/false = off.
 	Trace *TraceConfig `toml:"trace"`
+	// PeerSharing controls what this daemon advertises to peer daemons
+	// (federation requests carrying X-Oxyp-Instance). Nil = defaults
+	// (hide peer-derived servers, no allow/deny filtering).
+	PeerSharing *PeerSharingConfig `toml:"peer_sharing"`
+}
+
+// Peer-sharing mode constants: what a daemon advertises to peer daemons.
+const (
+	// PeerSharingHide (default): peers see local servers only;
+	// peer-derived virtuals are never advertised (depth-1 federation).
+	PeerSharingHide = "hide"
+	// PeerSharingShow: peers also see peer-derived virtuals (transitive);
+	// allow/deny globs still apply, deny wins.
+	PeerSharingShow = "show"
+)
+
+// PeerSharingConfig is [daemon.peer_sharing]: the owner-side export policy
+// for federation. It filters listings AND blocks direct access for
+// well-behaved (header-sending) peers — but peers hold the same operator
+// bearer token, so a modified client can drop the header and see the full
+// view. Trust model: peers are trusted; sharing controls automation
+// (what auto-mounts downstream), not access. If you wouldn't hand a daemon
+// your token, don't peer with it.
+type PeerSharingConfig struct {
+	// Mode is "hide" (default) or "show" (transitive).
+	Mode string `toml:"mode"`
+	// Allow globs the shared server names (bare display form; empty = all).
+	Allow []string `toml:"allow"`
+	// Deny globs the withheld server names (deny always wins).
+	Deny []string `toml:"deny"`
+}
+
+// ModeOr default-normalizes the mode ("" = hide).
+func (p *PeerSharingConfig) ModeOr() string {
+	if p == nil || p.Mode == "" {
+		return PeerSharingHide
+	}
+	return p.Mode
+}
+
+// DeepCopy clones the peer-sharing config (nil-safe).
+func (p *PeerSharingConfig) DeepCopy() *PeerSharingConfig {
+	if p == nil {
+		return nil
+	}
+	out := *p
+	out.Allow = append([]string(nil), p.Allow...)
+	out.Deny = append([]string(nil), p.Deny...)
+	return &out
 }
 
 // DeepCopy clones pointer fields so daemon readers never alias live config.
@@ -86,6 +140,7 @@ func (d DaemonConfig) DeepCopy() DaemonConfig {
 		v := *d.Trace
 		out.Trace = &v
 	}
+	out.PeerSharing = d.PeerSharing.DeepCopy()
 	return out
 }
 
@@ -156,13 +211,28 @@ type ServerEntry struct {
 	// PassthroughHeaders is an opt-in allowlist of incoming request headers
 	// forwarded upstream per-request (remote-only). Config Headers win on conflict.
 	PassthroughHeaders []string `toml:"passthrough_headers"`
+	// PeerExport governs whether this server may travel downstream through
+	// peers (origin consent). Nil/false = direct peers only: the server is
+	// advertised to direct peers (subject to peer_sharing) but never
+	// re-exported by them. True = may appear in transitive catalogs.
+	PeerExport *PeerExportConfig `toml:"peer_export"`
 
 	// Name is the map key, set at load. ConfigError is set by validation,
 	// never by users. Server stays listed but unhealthy; daemon keeps running.
-	Name        string `toml:"-"`
-	ConfigError string `toml:"-"`
-	// FromConnector is the discovered file path, for status reporting.
+	Name          string `toml:"-"`
+	ConfigError   string `toml:"-"`
 	FromConnector string `toml:"-"`
+	// Peer is the owning peer for virtual entries ("": local).
+	// PeerOwner is the owner-side server name. Both are daemon-derived
+	// (never TOML); Name holds the canonical qualified name.
+	Peer      string `toml:"-"`
+	PeerOwner string `toml:"-"`
+	// PeerTransitive carries the owner's advertised re-export consent for
+	// virtual entries (daemon-derived from the catalog row at import).
+	PeerTransitive bool `toml:"-"`
+	// PeerV1 reports the owner speaks /federation/v1 (bulk catalog worked).
+	// Daemon-derived at import; proxies route v1-first on true, thin on false.
+	PeerV1 bool `toml:"-"`
 }
 
 // DeepCopy returns an independent copy (maps, slices, and sub-configs
@@ -203,6 +273,10 @@ func (s ServerEntry) DeepCopy() ServerEntry {
 		out.Params[k] = slices.Clone(v)
 	}
 	out.PassthroughHeaders = slices.Clone(s.PassthroughHeaders)
+	if s.PeerExport != nil {
+		v := *s.PeerExport
+		out.PeerExport = &v
+	}
 	if s.IdleTimeout != nil {
 		v := *s.IdleTimeout
 		out.IdleTimeout = &v
@@ -371,6 +445,15 @@ type ToolsPolicy struct {
 	Deny  []string `toml:"deny"`
 }
 
+// PeerExportConfig is [servers.<name>.peer_export]: origin consent for
+// transitive federation. Default closed: direct peers only.
+type PeerExportConfig struct {
+	// Transitive allows this server to be re-exported downstream by peers
+	// (show-mode catalogs). Both sides veto: owner transitive=false hides
+	// it downstream; middle hide/deny hides it too.
+	Transitive bool `toml:"transitive"`
+}
+
 // Load reads dir/oxyp.toml, merges auto-discovered connectors, validates.
 // Never fails on a bad entry — marks ConfigError instead. Fails only if the
 // file itself is unreadable or unparseable.
@@ -417,6 +500,19 @@ func Load(dir string) (*Config, error) {
 	if cfg.Groups == nil {
 		cfg.Groups = map[string]GroupEntry{}
 	}
+	if cfg.Peers == nil {
+		cfg.Peers = map[string]PeerEntry{}
+	}
+	for name, p := range cfg.Peers {
+		p.Name = name
+		if msg := expandPeerSecrets(&p); msg != "" {
+			p.ConfigError = msg
+			cfg.Peers[name] = p
+			continue
+		}
+		p.ConfigError = validatePeer(&p)
+		cfg.Peers[name] = p
+	}
 	return &cfg, nil
 }
 
@@ -457,6 +553,9 @@ func mergeConnectors(cfg *Config, dir string) {
 func validateServer(s *ServerEntry) string {
 	if s.Name == "" {
 		return `"name" is required`
+	}
+	if strings.Contains(s.Name, ":") {
+		return fmt.Sprintf("server %q: name must not contain ':' (reserved for peer:server)", s.Name)
 	}
 	if s.URL != "" {
 		if len(s.Command) != 0 {
@@ -591,6 +690,87 @@ func validateServer(s *ServerEntry) string {
 	return ""
 }
 
+func validatePeer(p *PeerEntry) string {
+	if p.Name == "" {
+		return `"name" is required`
+	}
+	if strings.Contains(p.Name, ":") {
+		return fmt.Sprintf("peer %q: name must not contain ':'", p.Name)
+	}
+	if p.Name == "local" {
+		return fmt.Sprintf("peer %q: name %q is reserved (local: escape hatch)", p.Name, p.Name)
+	}
+	if strings.TrimSpace(p.URL) == "" {
+		return fmt.Sprintf("peer %q: url is required", p.Name)
+	}
+	if !strings.HasPrefix(p.URL, "http://") && !strings.HasPrefix(p.URL, "https://") {
+		return fmt.Sprintf("peer %q: url must start with http(s)://", p.Name)
+	}
+	switch p.ModeOr() {
+	case PeerModeMerge, PeerModeNamespace:
+	default:
+		return fmt.Sprintf("peer %q: mode must be merge|namespace", p.Name)
+	}
+	if p.Timeout != nil && *p.Timeout < 0 {
+		return fmt.Sprintf("peer %q: timeout must be >= 0", p.Name)
+	}
+	for i, s := range p.Include {
+		if strings.TrimSpace(s) == "" {
+			return fmt.Sprintf("peer %q: include[%d] must not be empty", p.Name, i)
+		}
+	}
+	for name, s := range p.Servers {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Sprintf("peer %q: servers has empty server name", p.Name)
+		}
+		// Pinned owner routes (c:gamma) are legal keys: they name one
+		// transitive unambiguously. Leaf keys (gamma) match any route
+		// ending there; full keys win over leaf keys.
+		if s.Priority == nil && s.Timeout == nil && s.Tools == nil && s.Params == nil {
+			return fmt.Sprintf("peer %q: servers.%s is empty (want priority|timeout|tools|params)", p.Name, name)
+		}
+		if s.Timeout != nil && *s.Timeout < 0 {
+			return fmt.Sprintf("peer %q: servers.%s timeout must be >= 0", p.Name, name)
+		}
+		if s.Tools != nil {
+			for i, g := range s.Tools.Allow {
+				if strings.TrimSpace(g) == "" {
+					return fmt.Sprintf("peer %q: servers.%s tools.allow[%d] must not be empty", p.Name, name, i)
+				}
+			}
+			for i, g := range s.Tools.Deny {
+				if strings.TrimSpace(g) == "" {
+					return fmt.Sprintf("peer %q: servers.%s tools.deny[%d] must not be empty", p.Name, name, i)
+				}
+			}
+		}
+		for tool, params := range s.Params {
+			if strings.TrimSpace(tool) == "" {
+				return fmt.Sprintf("peer %q: servers.%s params has empty tool name", p.Name, name)
+			}
+			for i, prm := range params {
+				if strings.TrimSpace(prm) == "" {
+					return fmt.Sprintf("peer %q: servers.%s params.%s[%d] must not be empty", p.Name, name, tool, i)
+				}
+			}
+		}
+	}
+	if p.TLS != nil {
+		t := p.TLS
+		if (t.CertFile == "") != (t.KeyFile == "") {
+			return fmt.Sprintf("peer %q: tls cert_file and key_file must both be set", p.Name)
+		}
+		for _, f := range []string{t.CAFile, t.CertFile, t.KeyFile} {
+			if f != "" {
+				if st, err := os.Stat(f); err != nil || st.IsDir() {
+					return fmt.Sprintf("peer %q: tls file unreadable: %s", p.Name, f)
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // ValidateDaemon checks daemon-wide blocks (called from Load).
 // A non-loopback bind with an empty token is a Load error.
 func ValidateDaemon(d *DaemonConfig) string {
@@ -604,6 +784,29 @@ func ValidateDaemon(d *DaemonConfig) string {
 	}
 	if d.IdleTimeout != nil && *d.IdleTimeout < 0 {
 		return "daemon.idle_timeout must be >= 0"
+	}
+	if strings.Contains(d.Name, ":") {
+		return "daemon.name must not contain ':'"
+	}
+	if d.Name == "local" {
+		return `daemon.name "local" is reserved (local: escape hatch)`
+	}
+	if d.PeerSharing != nil {
+		switch d.PeerSharing.ModeOr() {
+		case PeerSharingHide, PeerSharingShow:
+		default:
+			return "daemon.peer_sharing.mode must be hide|show"
+		}
+		for i, g := range d.PeerSharing.Allow {
+			if strings.TrimSpace(g) == "" {
+				return "daemon.peer_sharing.allow[" + strconv.Itoa(i) + "] must not be empty"
+			}
+		}
+		for i, g := range d.PeerSharing.Deny {
+			if strings.TrimSpace(g) == "" {
+				return "daemon.peer_sharing.deny[" + strconv.Itoa(i) + "] must not be empty"
+			}
+		}
 	}
 	if d.Token == "" && d.Addr != "" && !isLoopbackAddr(d.Addr) {
 		return "daemon.token is required for non-loopback addr"

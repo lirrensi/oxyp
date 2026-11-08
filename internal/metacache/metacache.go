@@ -99,6 +99,9 @@ func Fingerprint(s config.ServerEntry) string {
 		timeout = *s.ToolTimeout
 	}
 	fmt.Fprintf(&b, "\x07hide=%v|timeout=%d", hide, timeout)
+	if s.Peer != "" {
+		b.WriteString("\x08peer=" + s.Peer + "\x08owner=" + s.PeerOwner)
+	}
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:16])
 }

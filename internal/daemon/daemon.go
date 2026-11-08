@@ -33,6 +33,7 @@ import (
 	"github.com/lirrensi/oxyp/internal/config"
 	"github.com/lirrensi/oxyp/internal/metacache"
 	"github.com/lirrensi/oxyp/internal/oauth"
+	peerfederation "github.com/lirrensi/oxyp/internal/peerfederation"
 	"github.com/lirrensi/oxyp/internal/perms"
 	"github.com/lirrensi/oxyp/internal/ptrace"
 	"github.com/lirrensi/oxyp/internal/redact"
@@ -123,6 +124,7 @@ type managed struct {
 	// instructions is captured at init and cached with tools.
 	instructions string
 	prompts      []mcp.Prompt
+	templates    []mcp.ResourceTemplate
 }
 
 // Daemon holds all downstream servers. Create with New.
@@ -142,6 +144,19 @@ type Daemon struct {
 	daemonCfg config.DaemonConfig
 	// groups holds curated server subsets ([groups.*]); guarded by mu.
 	groups map[string]config.GroupEntry
+	// peersMap holds live peer state ([peers.*]); guarded by mu.
+	peersMap map[string]*peerRuntime
+	// aliases maps bare merge names to winning qualified keys; shadows
+	// lists the qualified losers. Both rebuilt with membership; mu-guarded.
+	aliases map[string]string
+	shadows map[string][]string
+	// instanceID is this daemon's federation id (loop guard).
+	instanceID string
+	// syncMu guards syncing/syncAgain (SyncPeers coalescing: a request
+	// arriving mid-sync sets syncAgain; the runner re-runs once).
+	syncMu    sync.Mutex
+	syncing   bool
+	syncAgain bool
 	// tracer emits metadata-only protocol events (nil = off).
 	tracer *ptrace.Tracer
 	// spawnCtx is the daemon-lifetime context for downstream clients:
@@ -199,15 +214,19 @@ func NewWithDirs(cfg *config.Config, log *slog.Logger, oauthDir, cachePath strin
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 	d := &Daemon{
-		servers:   map[string]*managed{},
-		log:       log,
-		initTO:    DefaultInitTimeout,
-		healthIv:  DefaultHealthInterval,
-		healthTO:  DefaultHealthTimeout,
-		reqTO:     DefaultRequestTimeout,
-		oauthDir:  oauthDir,
-		daemonCfg: cfg.Daemon,
-		groups:    maps.Clone(cfg.Groups),
+		servers:    map[string]*managed{},
+		log:        log,
+		initTO:     DefaultInitTimeout,
+		healthIv:   DefaultHealthInterval,
+		healthTO:   DefaultHealthTimeout,
+		reqTO:      DefaultRequestTimeout,
+		oauthDir:   oauthDir,
+		daemonCfg:  cfg.Daemon,
+		groups:     maps.Clone(cfg.Groups),
+		peersMap:   map[string]*peerRuntime{},
+		aliases:    map[string]string{},
+		shadows:    map[string][]string{},
+		instanceID: peerfederation.NewInstanceID(),
 	}
 	if d.groups == nil {
 		d.groups = map[string]config.GroupEntry{}
@@ -232,16 +251,57 @@ func NewWithDirs(cfg *config.Config, log *slog.Logger, oauthDir, cachePath strin
 	if d.cache != nil {
 		d.cache.DropStale(fps)
 	}
+	d.rebuildPeers(cfg.Peers)
 	return d
 }
 
 // Names returns sorted configured server names (excludes disabled).
+// Merge winners appear under their bare name; qualified winner keys hide
+// from listings. A peer-beaten local hides too — its escape hatch is the
+// synthetic local:<name> form (addressable, never listed).
 func (d *Daemon) Names() []string {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+	hidden := map[string]bool{}
+	for bare, c := range d.aliases {
+		hidden[c] = true
+		if _, local := d.servers[bare]; local && c != bare {
+			hidden[bare] = true
+		}
+	}
 	out := make([]string, 0, len(d.servers))
 	for n := range d.servers {
+		if hidden[n] {
+			continue
+		}
 		out = append(out, n)
+	}
+	for bare := range d.aliases {
+		out = append(out, bare)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// PeerNames returns the names this daemon advertises to peer daemons:
+// locals bare, virtuals under their pinned canonical route (peer:server…,
+// multi-hop for transitives). Pinned names route at the owner without
+// merge-float: what the importer sees is what the owner resolves.
+// Sorted, duplicates removed.
+func (d *Daemon) PeerNames() []string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	seen := map[string]bool{}
+	var out []string
+	for q, m := range d.servers {
+		name := q
+		if m.cfg.Peer == "" && !strings.Contains(q, ":") {
+			name = q // local bare
+		}
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
 	}
 	sort.Strings(out)
 	return out
@@ -249,20 +309,21 @@ func (d *Daemon) Names() []string {
 
 // Entry returns a FRESH COPY of the config entry for a server, or nil.
 // The caller may read the copy lock-free; the live entry never escapes.
+// Bare merge names resolve to the winning entry (Name = bare name).
 func (d *Daemon) Entry(name string) *config.ServerEntry {
-	d.mu.RLock()
-	m, ok := d.servers[name]
-	d.mu.RUnlock()
-	if !ok {
+	m := d.managed(name)
+	if m == nil {
 		return nil
 	}
 	cfg := m.getCfg()
+	cfg.Name = name
 	return &cfg
 }
 
 // GroupMembers returns the sorted enabled member names of a group.
 // Unknown group → nil, false. Missing or disabled members are skipped
 // (doctor reports them; the daemon stays quiet).
+// Bare merge names resolve to their winner (member must name the bare form).
 func (d *Daemon) GroupMembers(group string) ([]string, bool) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -272,6 +333,9 @@ func (d *Daemon) GroupMembers(group string) ([]string, bool) {
 	}
 	var out []string
 	for _, m := range g.Servers {
+		if c, alias := d.aliases[m]; alias {
+			m = c
+		}
 		if _, ok := d.servers[m]; ok {
 			out = append(out, m)
 		}
@@ -294,6 +358,9 @@ func (d *Daemon) InGroup(group, server string) bool {
 		if m == server {
 			return true
 		}
+		if c, alias := d.resolve(server); alias && m == c {
+			return true
+		}
 	}
 	return false
 }
@@ -305,6 +372,27 @@ func (m *managed) getCfg() config.ServerEntry {
 	return m.getCfgLocked()
 }
 
+// managed returns the canonical managed entry for a user-facing name,
+// resolving bare merge aliases. Nil when unknown.
+// Alias wins over the direct map hit (a peer-beaten local hides under its
+// bare name); local:<name> reaches the hidden local directly.
+func (d *Daemon) managed(name string) *managed {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if rest, ok := strings.CutPrefix(name, "local:"); ok {
+		if m, hit := d.servers[rest]; hit && m.cfg.Peer == "" {
+			return m
+		}
+		return nil
+	}
+	if c, alias := d.aliases[name]; alias {
+		if m, ok := d.servers[c]; ok {
+			return m
+		}
+	}
+	return d.servers[name]
+}
+
 // getCfgLocked reads m.cfg; the caller must hold m.mu.
 func (m *managed) getCfgLocked() config.ServerEntry {
 	return m.cfg.DeepCopy()
@@ -313,10 +401,8 @@ func (m *managed) getCfgLocked() config.ServerEntry {
 // IsConnected reports whether the server has a live client (memory only,
 // never spawns). For the list path: connection state, not health history.
 func (d *Daemon) IsConnected(name string) bool {
-	d.mu.RLock()
-	m, ok := d.servers[name]
-	d.mu.RUnlock()
-	if !ok {
+	m := d.managed(name)
+	if m == nil {
 		return false
 	}
 	m.mu.Lock()
@@ -327,10 +413,8 @@ func (d *Daemon) IsConnected(name string) bool {
 // CachedInstructions returns the init-time instructions captured in memory,
 // or false when absent. It never spawns: failed/idle servers report none.
 func (d *Daemon) CachedInstructions(name string) (string, bool) {
-	d.mu.RLock()
-	m, ok := d.servers[name]
-	d.mu.RUnlock()
-	if !ok {
+	m := d.managed(name)
+	if m == nil {
 		return "", false
 	}
 	m.resMu.RLock()
@@ -338,25 +422,27 @@ func (d *Daemon) CachedInstructions(name string) (string, bool) {
 	return m.instructions, m.instructions != ""
 }
 
-// HealthOf returns the last health record, or nil if never checked/connected.
+// HealthOf returns a COPY of the last health record, or nil if never
+// checked/connected. Copy-on-read: the live record stays daemon-owned and
+// immutable to callers (federation writers replace it under healthMu).
 func (d *Daemon) HealthOf(name string) *Health {
-	d.mu.RLock()
-	m, ok := d.servers[name]
-	d.mu.RUnlock()
-	if !ok {
+	m := d.managed(name)
+	if m == nil {
 		return nil
 	}
 	m.healthMu.RLock()
 	defer m.healthMu.RUnlock()
-	return m.health
+	if m.health == nil {
+		return nil
+	}
+	h := *m.health
+	return &h
 }
 
 // get returns the managed server or an error (unknown or misconfigured).
 func (d *Daemon) get(name string) (*managed, error) {
-	d.mu.RLock()
-	m, ok := d.servers[name]
-	d.mu.RUnlock()
-	if !ok {
+	m := d.managed(name)
+	if m == nil {
 		return nil, fmt.Errorf("server %q not found", name)
 	}
 	if cfgErr := m.getCfg().ConfigError; cfgErr != "" {
@@ -405,7 +491,9 @@ func (d *Daemon) SearchTools(name, query string, regex bool, limit, offset int) 
 		if gerr != nil {
 			return nil, 0, 0, gerr
 		}
-		collect(name, m)
+		canon := d.ResolvedName(name)
+		collect(canon, m)
+		// Hits carry the canonical key; display rewrites to bare below.
 	} else {
 		d.mu.RLock()
 		names := make([]string, 0, len(d.servers))
@@ -422,6 +510,19 @@ func (d *Daemon) SearchTools(name, query string, regex bool, limit, offset int) 
 				continue
 			}
 			collect(n, m)
+		}
+	}
+	// Merge winners display under their bare name (qualified stays
+	// addressable for search filters and calls).
+	d.mu.RLock()
+	display := map[string]string{}
+	for bare, canon := range d.aliases {
+		display[canon] = bare
+	}
+	d.mu.RUnlock()
+	for i := range cands {
+		if b, ok := display[cands[i].Server]; ok {
+			cands[i].Server = b
 		}
 	}
 	var ranked []search.Result
@@ -442,10 +543,90 @@ func (d *Daemon) SearchTools(name, query string, regex bool, limit, offset int) 
 }
 
 // cachedTools returns memory-cached tools or nil (no spawn, no disk).
+// CachedToolNames returns cached tool names for one server (memory, else
+// disk at the current fingerprint). Never spawns, never revalidates — the
+// /federation/v1/rev hash input. Unknown server → nil.
+func (d *Daemon) CachedToolNames(name string) []string {
+	m := d.managed(name)
+	if m == nil {
+		return nil
+	}
+	tools := m.cachedTools()
+	if tools == nil && d.cache != nil {
+		canon := d.ResolvedName(name)
+		if t, ok := d.cache.Get(canon, metacache.Fingerprint(m.getCfg())); ok {
+			tools = t
+		}
+	}
+	if tools == nil {
+		return nil
+	}
+	out := make([]string, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, t.Name)
+	}
+	return out
+}
+
 func (m *managed) cachedTools() []mcp.Tool {
 	m.toolsMu.RLock()
 	defer m.toolsMu.RUnlock()
 	return m.tools
+}
+
+// CachedResourceURIs returns memory-cached resource URIs (no spawn, no disk).
+// Unknown server → nil. Rev-hash input alongside CachedToolNames.
+func (d *Daemon) CachedResourceURIs(name string) []string {
+	m := d.managed(name)
+	if m == nil {
+		return nil
+	}
+	m.resMu.RLock()
+	defer m.resMu.RUnlock()
+	if m.res == nil {
+		return nil
+	}
+	out := make([]string, 0, len(m.res))
+	for _, r := range m.res {
+		out = append(out, r.URI)
+	}
+	return out
+}
+
+// CachedTemplateNames returns memory-cached resource template names.
+func (d *Daemon) CachedTemplateNames(name string) []string {
+	m := d.managed(name)
+	if m == nil {
+		return nil
+	}
+	m.resMu.RLock()
+	defer m.resMu.RUnlock()
+	if m.templates == nil {
+		return nil
+	}
+	out := make([]string, 0, len(m.templates))
+	for _, t := range m.templates {
+		out = append(out, t.Name)
+	}
+	return out
+}
+
+// CachedPromptNames returns memory-cached prompt names.
+func (d *Daemon) CachedPromptNames(name string) []string {
+	m := d.managed(name)
+	if m == nil {
+		return nil
+	}
+	m.resMu.RLock()
+	defer m.resMu.RUnlock()
+	if m.prompts == nil {
+		return nil
+	}
+	out := make([]string, 0, len(m.prompts))
+	for _, p := range m.prompts {
+		out = append(out, p.Name)
+	}
+	return out
 }
 
 // clientFor returns a connected client, spawning lazily on first use.
@@ -534,6 +715,11 @@ func (d *Daemon) clientForGen(ctx context.Context, m *managed, retries int) (cli
 func (d *Daemon) spawn(ctx context.Context, m *managed, gen int) (client.MCPClient, error) {
 	cfg := m.getCfg()
 	log := d.log.With("server", cfg.Name)
+	// Peer virtuals proxy over REST instead of MCP: no stdio child, no
+	// MCP dial. The proxy carries the loop guard via ctx (instance + chain).
+	if cfg.Peer != "" {
+		return d.spawnPeer(ctx, m, cfg)
+	}
 	// Downstream lifetime binds to the daemon, not the triggering RPC:
 	// stdio children (exec.CommandContext) and SSE streams would die
 	// when the request ctx is cancelled after ServeHTTP returns.
@@ -914,6 +1100,17 @@ func pipeStderr(ctx context.Context, log *slog.Logger, r io.Reader) {
 	}
 }
 
+// RestoreHealth overwrites one server's health record (view endpoints use
+// it to quarantine best-effort fill failures: a row that fails to list must
+// not poison the served health/rev).
+func (d *Daemon) RestoreHealth(name string, h *Health) {
+	m := d.managed(name)
+	if m == nil {
+		return
+	}
+	m.setHealth(h)
+}
+
 func (m *managed) setHealth(h *Health) {
 	m.healthMu.Lock()
 	m.health = h
@@ -932,6 +1129,9 @@ func (d *Daemon) ListTools(ctx context.Context, name string) ([]mcp.Tool, error)
 	if err != nil {
 		return nil, err
 	}
+	// Bare merge names resolve to the winner: cache keys follow the
+	// canonical entry so alias and qualified share one snapshot.
+	name = d.ResolvedName(name)
 	cfg := m.getCfg()
 	fp := metacache.Fingerprint(cfg)
 	m.toolsMu.RLock()
@@ -1070,6 +1270,7 @@ func (d *Daemon) RefreshTools(ctx context.Context, name string) (tools []mcp.Too
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	name = d.ResolvedName(name)
 	cfg := m.getCfg()
 	fp := metacache.Fingerprint(cfg)
 	m.toolsMu.RLock()
@@ -1134,11 +1335,12 @@ func diffToolNames(old, live []mcp.Tool) (added, removed []string) {
 }
 
 func (d *Daemon) listToolsOnce(ctx context.Context, m *managed) ([]mcp.Tool, error) {
+	ctx = d.withFederation(ctx)
 	c, err := d.clientFor(ctx, m)
 	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, d.reqTO)
+	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
 	defer cancel()
 	cfg := m.getCfg()
 	start := time.Now()
@@ -1275,6 +1477,7 @@ func (d *Daemon) InvalidateResources(name string) {
 	m.resMu.Lock()
 	m.res = nil
 	m.prompts = nil
+	m.templates = nil
 	m.resMu.Unlock()
 }
 
@@ -1294,6 +1497,7 @@ func (d *Daemon) Instructions(ctx context.Context, name string) (string, error) 
 	m.resMu.RUnlock()
 	// clientFor runs initialize, whose result carries instructions; the
 	// spawn path caches them. A second check covers the race.
+	ctx = d.withFederation(ctx)
 	if _, err := d.clientFor(ctx, m); err != nil {
 		d.recordFailure(m, err)
 		return "", err
@@ -1347,11 +1551,12 @@ func (d *Daemon) ListResources(ctx context.Context, name string) ([]mcp.Resource
 }
 
 func (d *Daemon) listResourcesOnce(ctx context.Context, m *managed) ([]mcp.Resource, error) {
+	ctx = d.withFederation(ctx)
 	c, err := d.clientFor(ctx, m)
 	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, d.reqTO)
+	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
 	defer cancel()
 	res, err := c.ListResources(reqCtx, mcp.ListResourcesRequest{})
 	if err != nil {
@@ -1400,11 +1605,12 @@ func (d *Daemon) ReadResource(ctx context.Context, name, uri string) (*mcp.ReadR
 }
 
 func (d *Daemon) readResourceOnce(ctx context.Context, m *managed, uri string) (*mcp.ReadResourceResult, error) {
+	ctx = d.withFederation(ctx)
 	c, err := d.clientFor(ctx, m)
 	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, d.reqTO)
+	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
 	defer cancel()
 	return c.ReadResource(reqCtx, mcp.ReadResourceRequest{
 		Params: mcp.ReadResourceParams{URI: uri},
@@ -1446,22 +1652,171 @@ func (d *Daemon) ListPrompts(ctx context.Context, name string) ([]mcp.Prompt, er
 		d.recordFailure(m, err)
 		return nil, err
 	}
+	m.resMu.Lock()
+	m.prompts = prompts
+	m.resMu.Unlock()
 	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
 	return prompts, nil
 }
 
 func (d *Daemon) listPromptsOnce(ctx context.Context, m *managed) ([]mcp.Prompt, error) {
+	ctx = d.withFederation(ctx)
 	c, err := d.clientFor(ctx, m)
 	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, d.reqTO)
+	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
 	defer cancel()
 	res, err := c.ListPrompts(reqCtx, mcp.ListPromptsRequest{})
 	if err != nil {
 		return nil, err
 	}
 	return res.Prompts, nil
+}
+
+// ListResourceTemplates discovers downstream URI templates. Order: memory →
+// live (spawns cold servers). No disk cache. Same session-expiry retry.
+func (d *Daemon) ListResourceTemplates(ctx context.Context, name string) ([]mcp.ResourceTemplate, error) {
+	m, err := d.get(name)
+	if err != nil {
+		return nil, err
+	}
+	m.resMu.RLock()
+	if m.templates != nil {
+		t := m.templates
+		m.resMu.RUnlock()
+		return t, nil
+	}
+	m.resMu.RUnlock()
+	tmpl, err := d.listTemplatesOnce(ctx, m)
+	cfg := m.getCfg()
+	if err != nil {
+		if aerr := d.mapAuthErr(m, cfg, err); aerr != nil {
+			d.recordFailure(m, aerr)
+			return nil, aerr
+		}
+		if cfg.IsRemote() && errors.Is(err, transport.ErrSessionTerminated) {
+			d.log.Info("session expired, re-initializing", "server", name)
+			d.resetClient(m)
+			tmpl, err = d.listTemplatesOnce(ctx, m)
+		}
+	}
+	if err != nil {
+		if aerr := d.mapAuthErr(m, cfg, err); aerr != nil {
+			d.recordFailure(m, aerr)
+			return nil, aerr
+		}
+		d.recordFailure(m, err)
+		return nil, err
+	}
+	m.resMu.Lock()
+	m.templates = tmpl
+	m.resMu.Unlock()
+	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	return tmpl, nil
+}
+
+func (d *Daemon) listTemplatesOnce(ctx context.Context, m *managed) ([]mcp.ResourceTemplate, error) {
+	ctx = d.withFederation(ctx)
+	c, err := d.clientFor(ctx, m)
+	if err != nil {
+		return nil, err
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
+	defer cancel()
+	res, err := c.ListResourceTemplates(reqCtx, mcp.ListResourceTemplatesRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return res.ResourceTemplates, nil
+}
+
+// GetPrompt fetches one rendered prompt (live data, no cache).
+// Same session-expiry retry as tools.
+func (d *Daemon) GetPrompt(ctx context.Context, name, prompt string, args map[string]string) (*mcp.GetPromptResult, error) {
+	m, err := d.get(name)
+	if err != nil {
+		return nil, err
+	}
+	res, err := d.getPromptOnce(ctx, m, prompt, args)
+	cfg := m.getCfg()
+	if err != nil {
+		if aerr := d.mapAuthErr(m, cfg, err); aerr != nil {
+			d.recordFailure(m, aerr)
+			return nil, aerr
+		}
+		if cfg.IsRemote() && errors.Is(err, transport.ErrSessionTerminated) {
+			d.log.Info("session expired, re-initializing", "server", name)
+			d.resetClient(m)
+			res, err = d.getPromptOnce(ctx, m, prompt, args)
+		}
+	}
+	if err != nil {
+		if aerr := d.mapAuthErr(m, cfg, err); aerr != nil {
+			d.recordFailure(m, aerr)
+			return nil, aerr
+		}
+		d.recordFailure(m, err)
+		return nil, err
+	}
+	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	return res, nil
+}
+
+func (d *Daemon) getPromptOnce(ctx context.Context, m *managed, prompt string, args map[string]string) (*mcp.GetPromptResult, error) {
+	ctx = d.withFederation(ctx)
+	c, err := d.clientFor(ctx, m)
+	if err != nil {
+		return nil, err
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
+	defer cancel()
+	return c.GetPrompt(reqCtx, mcp.GetPromptRequest{
+		Params: mcp.GetPromptParams{Name: prompt, Arguments: args},
+	})
+}
+
+// Complete requests completion options (live, no cache).
+// Same session-expiry retry as tools.
+func (d *Daemon) Complete(ctx context.Context, name string, params mcp.CompleteParams) (*mcp.CompleteResult, error) {
+	m, err := d.get(name)
+	if err != nil {
+		return nil, err
+	}
+	res, err := d.completeOnce(ctx, m, params)
+	cfg := m.getCfg()
+	if err != nil {
+		if aerr := d.mapAuthErr(m, cfg, err); aerr != nil {
+			d.recordFailure(m, aerr)
+			return nil, aerr
+		}
+		if cfg.IsRemote() && errors.Is(err, transport.ErrSessionTerminated) {
+			d.log.Info("session expired, re-initializing", "server", name)
+			d.resetClient(m)
+			res, err = d.completeOnce(ctx, m, params)
+		}
+	}
+	if err != nil {
+		if aerr := d.mapAuthErr(m, cfg, err); aerr != nil {
+			d.recordFailure(m, aerr)
+			return nil, aerr
+		}
+		d.recordFailure(m, err)
+		return nil, err
+	}
+	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	return res, nil
+}
+
+func (d *Daemon) completeOnce(ctx context.Context, m *managed, params mcp.CompleteParams) (*mcp.CompleteResult, error) {
+	ctx = d.withFederation(ctx)
+	c, err := d.clientFor(ctx, m)
+	if err != nil {
+		return nil, err
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
+	defer cancel()
+	return c.Complete(reqCtx, mcp.CompleteRequest{Params: params})
 }
 
 // childEnv builds the stdio child's environment. inherit_env=false starts
@@ -1597,6 +1952,12 @@ func probeRemote(cfg config.ServerEntry, timeout time.Duration) string {
 // CallTool invokes one downstream tool. Spawns cold servers.
 // Same session-expiry retry as ListTools.
 func (d *Daemon) CallTool(ctx context.Context, name, tool string, args map[string]any) (*mcp.CallToolResult, error) {
+	return d.CallToolWithMeta(ctx, name, tool, args, nil)
+}
+
+// CallToolWithMeta invokes one downstream tool, forwarding request _meta
+// (progress tokens, tracing) to the downstream params. Nil meta = none.
+func (d *Daemon) CallToolWithMeta(ctx context.Context, name, tool string, args map[string]any, meta map[string]any) (*mcp.CallToolResult, error) {
 	m, err := d.get(name)
 	if err != nil {
 		return nil, err
@@ -1613,7 +1974,8 @@ func (d *Daemon) CallTool(ctx context.Context, name, tool string, args map[strin
 		m.lastUsed = time.Now()
 		m.mu.Unlock()
 	}()
-	res, err := d.callToolOnce(ctx, m, tool, args)
+	ctx = d.withFederation(ctx)
+	res, err := d.callToolOnce(ctx, m, tool, args, meta)
 	cfg := m.getCfg()
 	if err != nil {
 		if aerr := d.mapAuthErr(m, cfg, err); aerr != nil {
@@ -1623,7 +1985,7 @@ func (d *Daemon) CallTool(ctx context.Context, name, tool string, args map[strin
 		if cfg.IsRemote() && errors.Is(err, transport.ErrSessionTerminated) {
 			d.log.Info("session expired, re-initializing", "server", name)
 			d.resetClient(m)
-			res, err = d.callToolOnce(ctx, m, tool, args)
+			res, err = d.callToolOnce(ctx, m, tool, args, meta)
 		}
 	}
 	if err != nil {
@@ -1685,16 +2047,21 @@ func effectiveTimeout(cfg config.ServerEntry, dflt time.Duration) time.Duration 
 	return dflt
 }
 
-func (d *Daemon) callToolOnce(ctx context.Context, m *managed, tool string, args map[string]any) (*mcp.CallToolResult, error) {
+func (d *Daemon) callToolOnce(ctx context.Context, m *managed, tool string, args map[string]any, meta map[string]any) (*mcp.CallToolResult, error) {
+	ctx = d.withFederation(ctx)
 	c, err := d.clientFor(ctx, m)
 	if err != nil {
 		return nil, err
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
 	defer cancel()
+	params := mcp.CallToolParams{Name: tool, Arguments: args}
+	if meta != nil {
+		params.Meta = mcp.NewMetaFromMap(meta)
+	}
 	start := time.Now()
 	res, err := c.CallTool(reqCtx, mcp.CallToolRequest{
-		Params: mcp.CallToolParams{Name: tool, Arguments: args},
+		Params: params,
 	})
 	cfg := m.getCfg()
 	if d.traceFor(m) {
@@ -1742,19 +2109,25 @@ func (d *Daemon) PingLoop(ctx context.Context) {
 
 func (d *Daemon) pingConnected(ctx context.Context) {
 	d.mu.RLock()
-	names := make([]string, 0, len(d.servers))
+	var locals []string
+	peerVirt := map[string][]string{} // peer -> connected virtual names
 	for n, m := range d.servers {
 		m.mu.Lock()
 		connected := m.client != nil
 		m.mu.Unlock()
-		if connected {
-			names = append(names, n)
+		if !connected {
+			continue
+		}
+		if peer := m.cfg.Peer; peer != "" {
+			peerVirt[peer] = append(peerVirt[peer], n)
+		} else {
+			locals = append(locals, n)
 		}
 	}
 	d.mu.RUnlock()
 
 	var wg sync.WaitGroup
-	for _, n := range names {
+	for _, n := range locals {
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
@@ -1776,6 +2149,23 @@ func (d *Daemon) pingConnected(ctx context.Context) {
 			}
 			m.setHealth(&Health{Healthy: true, LastChecked: time.Now(), Latency: time.Since(start)})
 		}(n)
+	}
+	// One /health per peer, fanned out to its connected virtuals:
+	// N virtuals cost one probe, not N. Peers with zero connected virtuals
+	// still get a rev-compare tick (cold catalog-change detection).
+	for peer, names := range peerVirt {
+		wg.Add(1)
+		go func(peer string, names []string) {
+			defer wg.Done()
+			d.pingPeer(ctx, peer, names)
+		}(peer, names)
+	}
+	for _, peer := range d.peerNamesMissing(peerVirt) {
+		wg.Add(1)
+		go func(peer string) {
+			defer wg.Done()
+			d.pingPeer(ctx, peer, nil)
+		}(peer)
 	}
 	wg.Wait()
 }
@@ -1901,6 +2291,11 @@ func (d *Daemon) Reload(cfg *config.Config) (added, removed, modified []string) 
 		}
 	}
 	for name, m := range d.servers {
+		// Peer virtuals are owned by SyncPeers, not Reload: they survive
+		// config reloads untouched (their catalog comes from the owner).
+		if m.cfg.Peer != "" {
+			continue
+		}
 		ns, ok := want[name]
 		if !ok {
 			closeManaged(m)
@@ -1923,6 +2318,7 @@ func (d *Daemon) Reload(cfg *config.Config) (added, removed, modified []string) 
 			m.resMu.Lock()
 			m.res = nil
 			m.prompts = nil
+			m.templates = nil
 			m.instructions = ""
 			m.resMu.Unlock()
 			if ns.ConfigError != "" {
@@ -1949,6 +2345,8 @@ func (d *Daemon) Reload(cfg *config.Config) (added, removed, modified []string) 
 		d.cache.DropStale(fps)
 	}
 	d.mu.Unlock()
+	d.rebuildPeers(cfg.Peers)
+	d.rebuildAliases()
 	closeClientsBounded(toClose)
 	return added, removed, modified
 }

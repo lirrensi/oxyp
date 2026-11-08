@@ -121,3 +121,27 @@ func expandServerSecrets(s *ServerEntry) string {
 	}
 	return ""
 }
+
+// expandPeerSecrets expands url/token refs. Peers fail closed like remotes:
+// any leftover ${VAR} marks ConfigError (unset secrets never travel).
+func expandPeerSecrets(p *PeerEntry) string {
+	if p.URL != "" {
+		if u, err := expandValue(p.URL); err != nil {
+			return fmt.Sprintf("peer %q: url: %v", p.Name, err)
+		} else if envRefRe.MatchString(u) || fileRefRe.MatchString(u) {
+			return fmt.Sprintf("peer %q: url has unset ${VAR}", p.Name)
+		} else {
+			p.URL = u
+		}
+	}
+	if p.Token != "" {
+		if t, err := expandValue(p.Token); err != nil {
+			return fmt.Sprintf("peer %q: token: %v", p.Name, err)
+		} else if envRefRe.MatchString(t) || fileRefRe.MatchString(t) {
+			return fmt.Sprintf("peer %q: token has unset ${VAR}", p.Name)
+		} else {
+			p.Token = t
+		}
+	}
+	return ""
+}

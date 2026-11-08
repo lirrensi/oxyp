@@ -49,6 +49,11 @@ func matches(pattern, value string) bool {
 	return globToRegexp(pattern).MatchString(value)
 }
 
+// MatchAny reports whether value matches any glob (* and ?, case-insensitive).
+func MatchAny(patterns []string, value string) (string, bool) {
+	return matchAny(patterns, value)
+}
+
 func matchAny(patterns []string, tool string) (string, bool) {
 	for _, p := range patterns {
 		if matches(p, tool) {
