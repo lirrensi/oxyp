@@ -33,3 +33,6 @@ __pycache__/
 oxyp-output-*.txt
 .cache-*.tmp
 .tok-*.tmp
+
+# Agent working files (reviews, plans, scratch — never committed)
+.agents/
