@@ -100,17 +100,23 @@ MCP shim (any client, one `{command: oxyp, args: [shim]}` line), CLI (`servers /
 ---
 ## Install — one copy-paste
 
-No Go toolchain? Grab a binary (linux/darwin amd64+arm64, windows amd64 —
-built by CI on every push):
+One line, zero thinking — downloads the release binary, puts it on your PATH,
+and verifies it runs:
 
 ```bash
-curl -fsSL -o oxyp https://github.com/lirrensi/oxyp/releases/latest/download/oxyp-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && chmod +x oxyp && sudo mv oxyp /usr/local/bin/
+curl -fsSL https://raw.githubusercontent.com/lirrensi/oxyp/main/install.sh | sh
 ```
 
-Got Go 1.21+ (the toolchain auto-upgrades to whatever oxyp needs)?
+Open a new shell and `oxyp` is ready to go. Options (passed through the pipe):
+`sh -s -- --go` builds from source via `go install` instead of downloading;
+`--version v0.3.0` pins a release; `--dir DIR` overrides the install dir.
+No prebuilt binary for your platform? Use `--go` (needs Go 1.21+).
+
+Prefer to do it by hand? `go install` drops the binary in `~/go/bin` — point
+`GOBIN` at a dir already on your PATH:
 
 ```bash
-go install github.com/lirrensi/oxyp/cmd/oxyp@latest
+GOBIN="$HOME/.local/bin" go install github.com/lirrensi/oxyp/cmd/oxyp@latest
 ```
 
 One static binary on your PATH either way. No runtime, no keychain, no machine-bound state. `oxyp` + `oxyp.toml` runs your agent anywhere.
@@ -282,8 +288,8 @@ Secrets ride `${VAR}` / `{file:/path}` — expanded at load, redacted in logs, n
 ```text
 Install oxyp (lazy MCP gateway) and connect it:
 
-1. Run: go install github.com/lirrensi/oxyp/cmd/oxyp@latest
-   (needs Go 1.21+; make sure ~/go/bin is on PATH)
+1. Run: curl -fsSL https://raw.githubusercontent.com/lirrensi/oxyp/main/install.sh | sh
+   (zero-config installer: binary + PATH + verify; add -s -- --go to build from source)
 2. Run: oxyp servers            (autostarts the daemon)
 3. Migrate existing MCPs: oxyp import --write
    (covers cursor/claude/vscode/opencode/omp)
