@@ -436,10 +436,75 @@ func RenderAll(blocks []NamedBlock) string {
 // ConfigPath returns dir/oxyp.toml.
 func ConfigPath(dir string) string { return filepath.Join(dir, "oxyp.toml") }
 
+// DefaultHeader is the self-documenting guide prepended to every new
+// oxyp.toml. Reading the file alone teaches add/change syntax, so the
+// default file IS the manual and diffs show what you changed.
+func DefaultHeader() string {
+	return `# oxyp.toml — one daemon, every connector.
+# Dir: --dir > OXYP_DIR > XDG_CONFIG_HOME/oxyp > ~/.oxyp
+# Edit, save, then: oxyp reload (or kill -HUP). Bad entries go unhealthy, never kill the daemon.
+#
+# QUICK ADD (so nobody forgets a description):
+#   oxyp add https://.../mcp --name github-corp1 --description "corp1 github, SSO" --write
+#   oxyp import --write            # from cursor/claude/vscode/opencode/omp
+#   oxyp login <name>              # if it needs OAuth
+#
+# SERVERS (one transport per server, name = map key, no ':' and not 'local'):
+#   [servers.github-personal]
+#   description = "personal github - oss + side quests"  # shown in servers/search, filter matches it
+#   url = "https://api.githubcopilot.com/mcp/"           # remote: Streamable HTTP (auto) or transport = "sse"
+#   # command = ["python3", "srv.py"]   # local: stdio child INSTEAD of url
+#   # auth = "oauth"                    # daemon-held OAuth (browser/device/token/client_credentials)
+#   # enabled = false                   # park it: hidden, cache dropped
+#   # lifecycle = "lazy"                # lazy/eager/keep-alive/lazy-keep-alive
+#   # tool_timeout = 60                 # per-RPC seconds, default 10
+#   # [servers.x.tools] allow/deny globs (deny wins, invisible+blocked)
+#   # [servers.x.params] tool = ["allowed", "args"] (extra args 403)
+#
+# GROUPS (curated per-client views):
+#   [groups.coding]
+#   servers = ["github-personal"]  # missing members skipped, doctor reports
+#   # CLI/shim: --group coding (OXYP_GROUP), ad-hoc: --servers a,b --exclude '*-prod' (globs, deny wins)
+#
+# PEERS (mount other daemons, auth stays where earned, tokens never travel):
+#   [peers.wsl]
+#   description = "wsl box - holds linear token"  # shows in peers list, so nobody forgets
+#   url = "http://192.168.1.5:8379"
+#   # mode = "merge"  # or "namespace" (no bare names, use wsl:db)
+#
+# DAEMON:
+#   [daemon]
+#   # addr = "127.0.0.1:8379"         # non-loopback needs token
+#   # token = "{file:~/.oxyp/bearer}" # required for 0.0.0.0, file or ${VAR}
+#
+# Secrets anywhere: ${VAR} / {file:/path}, expanded at load, redacted in logs.
+# Full schema: README Configure + doc/spec-guard.md + doc/spec-federation.md.
+`
+}
+
+// EnsureDefaultFile creates dir/oxyp.toml with only DefaultHeader when missing,
+// so the very first file a user reads IS the guide and later diffs show what
+// they changed. Existing files are left untouched. Used by daemon startup;
+// add/import go through AppendBlocks (which already prepends the header).
+func EnsureDefaultFile(dir string) error {
+	path := ConfigPath(dir)
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(DefaultHeader()+"\n"), 0o600)
+}
+
 // AppendBlocks appends TOML text to dir/oxyp.toml, creating the file (and dir)
-// if missing. New files are 0600; existing group/world-readable files are
-// tightened to 0600. Callers print the same text as the preview beforehand.
-// It returns a non-empty note when an existing file was tightened.
+// if missing. New files start with DefaultHeader so the file documents
+// itself; existing files are appended to untouched. New files are 0600;
+// existing group/world-readable files are tightened to 0600. Callers print
+// the same text as the preview beforehand. It returns a non-empty note when
+// an existing file was tightened.
 func AppendBlocks(dir, text string) (string, error) {
 	path := ConfigPath(dir)
 	if !strings.HasSuffix(text, "\n") {
@@ -453,7 +518,8 @@ func AppendBlocks(dir, text string) (string, error) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return "", err
 		}
-		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		full := DefaultHeader() + "\n" + text
+		if err := os.WriteFile(path, []byte(full), 0o600); err != nil {
 			return "", err
 		}
 		return "", nil

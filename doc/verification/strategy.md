@@ -2,25 +2,26 @@
 node_type: verification
 title: oxyp Verification Strategy
 status: active
-updated: 2026-10-30
+updated: 2026-11-09
 tags: [verification, testing, zoo, evidence]
 links:
-  depends_on: [/overview.md, /spec-daemon.md, /spec-discovery.md, /spec-oauth.md, /spec-http-shim.md, /spec-guard.md, /spec-cli.md]
-  verifies: [/spec-daemon.md, /spec-discovery.md, /spec-oauth.md, /spec-http-shim.md, /spec-guard.md, /spec-cli.md]
+  depends_on: [/overview.md, /spec-daemon.md, /spec-discovery.md, /spec-oauth.md, /spec-http-shim.md, /spec-guard.md, /spec-cli.md, /spec-federation.md]
+  verifies: [/spec-daemon.md, /spec-discovery.md, /spec-oauth.md, /spec-http-shim.md, /spec-guard.md, /spec-cli.md, /spec-federation.md]
 ---
 
 # oxyp Verification Strategy
 
 ## Scope and intent
 
-Correct for oxyp means: the six behavior specs hold against the Go
-implementation — cold discovery, guarded invoke with media intact, four
-OAuth flows with refresh, CSRF-gated HTTP, honest doctor/add/import, and
+Correct for oxyp means: the seven behavior specs hold against the Go
+implementation — cold discovery + per-client views, guarded invoke with media intact, four
+OAuth flows with refresh, CSRF-gated HTTP with scope gates, honest doctor/add/import, federation
+with sharing + scope ANDing, and
 fail-closed secrets. A **test result** (exit 0) is not a **verification
 result** (the check exercises the intended spec scenario with inspectable
 evidence) and neither is a **validation result** (a human agrees the
 behavior solves the operator's problem — e.g. real-client shim attach,
-real-IdP login). This strategy names the real toolchain, the exact
+real-IdP login, per-folder 5-of-10 views). This strategy names the real toolchain, the exact
 commands, the evidence each layer produces, the traceability from spec to
 check, and the gaps we admit.
 
@@ -92,6 +93,8 @@ check, and the gaps we admit.
 | Pin/hide freeze + drift notes | V-DISC-007 | component | `go test ./internal/daemon/ -run 'Pin\|Hide\|Intersect'` + live doctor | local | `gates_test.go` + live smoke | verified (this session: pin skips disk, hide intersects, doctor drift) |
 | Params allowlist + 403 envelope | V-DISC-008 | unit/contract | `go test ./internal/daemon/ -run CheckParams` + `internal/meta` 403 shape | local | `gates_test.go` + live `call` 403 | verified (this session) |
 | Groups narrow + fail-closed unknown | V-DISC-009 | component | `go test ./internal/daemon/ -run Group` + live `servers/call/search --group` | local | `gates_test.go` + live smoke | verified (this session) |
+| Per-client scope (group+servers+exclude, deny wins, 404/403) | V-HTTP-007 | contract/component | `go test ./internal/daemon/ -run 'InScope|ParseScope|ParseArgList'` + `go test ./internal/meta/ -run ScopeFilters` | local | `scope_test.go` (daemon) + `scope_test.go` (meta) | verified (this session: whitelist, exclude-only, globs, group AND, unknown 404, outside 403) |
+| Scope is view-only (no spawn/drop, no reload) | V-DISC-012 | component | `go test ./internal/meta/ -run ScopeFilters` + `InScope` unit | local | meta scope test (hidden stays healthy, connected untouched) | verified (this session) |
 | /mcp gateway 5 tools + gates | V-HTTP-006 | integration | Go client vs `POST /mcp` (initialize→call) + live smoke | local | throwaway `mcpsmoke_test.go` (5 tools, cold search, live call) | verified (this session; throwaway removed) |
 | OAuth discovery URL overrides | V-OAUTH-008 | unit | device/CC discovery with override URL | local | code path (variadic override) | partial (no live broken-discovery IdP — gap) |
 | New knobs validation matrix | V-GUARD-008 | unit | `go test ./internal/config/ -run Validate` | local | `validate_test.go` (14 new cases) | verified |

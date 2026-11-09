@@ -28,11 +28,11 @@ func peersCmd() *cobra.Command {
 }
 
 func peersAddCmd() *cobra.Command {
-	var asFlag, tokenFlag, modeFlag string
+	var asFlag, tokenFlag, modeFlag, descFlag string
 	var writeFlag, forceFlag bool
 	var priorityFlag int
 	c := &cobra.Command{
-		Use:   "add <url> [--as name] [--token]",
+		Use:   "add <url> [--as name] [--token] [--description]",
 		Short: "handshake a peer daemon and append a [peers.<name>] entry",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -133,6 +133,9 @@ func peersAddCmd() *cobra.Command {
 
 			var b strings.Builder
 			fmt.Fprintf(&b, "[peers.%s]\n", tomlKeyFor(name))
+			if desc := strings.TrimSpace(descFlag); desc != "" {
+				fmt.Fprintf(&b, "description = %q\n", desc)
+			}
 			fmt.Fprintf(&b, "url = %q\n", rawurl)
 			if mode != config.PeerModeMerge {
 				fmt.Fprintf(&b, "mode = %q\n", mode)
@@ -166,6 +169,9 @@ func peersAddCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, note)
 			}
 			fmt.Fprintf(os.Stderr, "added [peers.%s] to %s\n", name, path)
+			if strings.TrimSpace(descFlag) == "" {
+				fmt.Fprintln(os.Stderr, "tip: re-run with --description \"wsl box - holds linear token\" or edit oxyp.toml (description shows in peers list)")
+			}
 			// Best-effort live mount: reload a running daemon so the peer
 			// appears without restart. Daemon down → it mounts at next start.
 			if _, _, rerr := apiCall("POST", "/reload", nil); rerr == nil {
@@ -177,6 +183,7 @@ func peersAddCmd() *cobra.Command {
 	c.Flags().StringVar(&asFlag, "as", "", "peer name (default: their daemon.name, else peer)")
 	c.Flags().StringVar(&tokenFlag, "token", "", "peer bearer token (else OXYP_PEER_TOKEN)")
 	c.Flags().StringVar(&modeFlag, "mode", "", "merge (default) or namespace")
+	c.Flags().StringVar(&descFlag, "description", "", "what is this peer for, whose tokens? (shows in peers list, so nobody forgets)")
 	c.Flags().IntVar(&priorityFlag, "priority", 0, "merge rank (lower wins; local = 0)")
 	c.Flags().BoolVar(&writeFlag, "write", false, "write without prompting")
 	c.Flags().BoolVar(&forceFlag, "force", false, "allow mounting a daemon already mounted under another name/URL")
@@ -253,7 +260,11 @@ func peersListCmd() *cobra.Command {
 				} else if p.ConfigError != "" {
 					state = "config: " + p.ConfigError
 				}
-				fmt.Printf("%s: %s (%s, priority %d)\n", n, p.URL, state, p.Priority)
+				if desc := strings.TrimSpace(p.Description); desc != "" {
+					fmt.Printf("%s: %s (%s, priority %d) — %s\n", n, p.URL, state, p.Priority, desc)
+				} else {
+					fmt.Printf("%s: %s (%s, priority %d)\n", n, p.URL, state, p.Priority)
+				}
 			}
 			return nil
 		},

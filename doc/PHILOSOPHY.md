@@ -55,3 +55,16 @@ deny-means-invisible, fail closed, no callbacks upstream. Visible-but-
 gated (list the tool, then beg approval at call time) is explicitly out
 of scope: it leaks capability metadata to the model while pretending to
 be safe.
+
+## 4. Views are per-client, not tenants
+
+`group` / `servers` / `exclude` are *view* filters, not security boundaries.
+One daemon, many views: `--group coding --exclude '*-prod'` hides servers
+from list/search AND 403s them on call — for *that* request only. Another
+client on the same daemon still sees everything. Deny wins, unknown groups
+fail closed, `/health` stays global so probes don't lie.
+
+If you wouldn't trust a client with a server at all, give it a different
+daemon (`--dir`). Views trim context; they don't replace tokens. Peers hold
+your operator bearer token — same rule: if you wouldn't hand a daemon your
+token, don't peer with it.

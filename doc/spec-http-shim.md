@@ -1,12 +1,12 @@
 ---
 node_type: spec
-title: HTTP API, CSRF Policy, Shim, and Media Passthrough
+title: HTTP API, CSRF Policy, Shim, Per-Client Views, and Media Passthrough
 status: active
-updated: 2026-10-30
-tags: [http, csrf, shim, media, api]
+updated: 2026-11-09
+tags: [http, csrf, shim, media, api, scope]
 links:
   depends_on: [/overview.md, /spec-daemon.md, /spec-discovery.md]
-  documents: [/internal/meta/, /cmd/oxyp/shim.go]
+  documents: [/internal/meta/, /internal/daemon/scope.go, /cmd/oxyp/shim.go]
   verified_by: [/verification/strategy.md]
 ---
 
@@ -15,31 +15,37 @@ links:
 ## Purpose
 
 This spec covers the daemon's own REST API (11 routes + auth gate), the
-shim that turns that REST into 5 MCP meta-tools, and the media passthrough
+per-client view layer (`group` + `servers` whitelist + `exclude` blacklist),
+the shim that turns that REST into 5 MCP meta-tools, and the media passthrough
 that keeps image/audio/resource blocks native end to end. It matters
-because every MCP client attaches through the shim, and every agent action
-flows through these envelopes.
+because every MCP client attaches through the shim or `POST /mcp`, and every
+agent action flows through these envelopes + scope gates.
 
 ## Boundaries
 
-**Handles:** route table, status codes, gate order, shim dispatch, error
+**Handles:** route table, per-client scope (`group`/`servers`/`exclude`), status codes, gate order, shim dispatch, error
 mapping, media/structuredContent preservation, probe hints.
 **Explicitly does NOT:** ranking (see [/spec-discovery.md](/spec-discovery.md)),
 OAuth flows (see [/spec-oauth.md](/spec-oauth.md)), guard caps (see
 [/spec-guard.md](/spec-guard.md)).
 **If it happens anyway:** those specs own the semantics; this spec owns the
-envelope.
+envelope + scope gate.
 
 ## Goals
 
 - **G1:** Every route has a fixed method + path + JSON shape + status
-  contract a client can code against.
+  contract a client can code against — including `?group=&servers=&exclude=`
+  scope on every server-scoped route.
 - **G2:** A loopback daemon with an empty token still rejects foreign
   `Host`/`Origin` and non-JSON state changes.
 - **G3:** The shim speaks strict MCP (`initialize/2024-11-05`, `tools/list`,
-  `tools/call`, `ping`) with pure-JSONL stdout and 5 static tools.
+  `tools/call`, `ping`) with pure-JSONL stdout and 5 static tools, one
+  fixed view per client (`--group/--servers/--exclude` over env).
 - **G4:** Non-text content blocks and `structuredContent` survive
   daemon → HTTP → shim → client structurally unchanged.
+- **G5:** One daemon serves many views: `group` (curated subset) ANDs with
+  `servers` whitelist ANDs with `exclude` blacklist (deny wins); unknown
+  group 404s, outside scope 403s, `/health` stays global.
 
 ## Requirements
 
@@ -56,20 +62,24 @@ wrong method → 405 plain text; unknown path → 404; JSON always
 
 | Method + path | Request | Success | Errors |
 |---|---|---|---|
-| `GET /servers` | `?filter=` substring of name/description, `?group=` curated subset | `{servers: [{name, description, instructions?, healthy?, error?, auth_required?, connected}]}`; instructions only when connected + cached; never spawns | gate only; 404 unknown group |
-| `GET /servers/{name}/tools` | `?group=` — server outside group ⇒ 403 | `{tools: [{name, description}]}`; denied omitted | 404 server/group; 403 outside group; 401 auth; 502 downstream |
-| `GET /servers/{name}/tools/{tool}` | `?group=` gate | `{name, description, inputSchema}`; match case-insensitive; deny checked pre-downstream | 404 server/denied/unknown/group; 403 outside group; 401/502 |
-| `POST /servers/{name}/tools/{tool}` | `{parameters: {...}}`, body cap 64 MiB, empty ⇒ nil; `?group=` gate | `{content: [...], isError, structuredContent?, _meta?}` | 404; 403 policy/param/group block; 400 bad JSON; 401; 502 |
-| `GET /servers/{name}/resources` | — | `{resources: [{uri, name, description, mimeType}], instructions}`; unsupported ⇒ `{resources: [], instructions}` | 404; 401/502 |
-| `GET /servers/{name}/resources/{uri…}` | tail or `?uri=`, exactly one | `{contents: [...]}` | 400 both/neither; `..` ⇒ 502; 401/502 |
-| `GET /servers/{name}/prompts` | — | `{prompts: [{name, description, arguments}]}`; unsupported ⇒ `{prompts: []}` | 404; 401/502 |
-| `GET /tools` | `?q=&server=&group=&regex=&limit=&offset=` (defaults 12/0; `regex` truthy `1`/`true`; numeric-prefix ints) | `{tools: [{server, name, description, score}], total, nextOffset}`; empty q ⇒ `[]`; group filters post-page | 400 unknown server/bad regex; 404 unknown group |
-| `GET /health` | — | `{servers: {name: {connected, healthy?, error?, auth_required?}}}`; error redacted; never spawns | gate only |
+| `GET /servers` | `?filter=` substring of name/description, `?group=&servers=&exclude=` scope (comma-separated + repeatable, `*`/`?` globs, deny wins) | `{servers: [{name, description, instructions?, healthy?, error?, auth_required?, connected}]}`; instructions only when connected + cached; never spawns | gate only; 404 unknown group |
+| `GET /servers/{name}/tools` | `?group=&servers=&exclude=` scope — outside ⇒ 403 `server not in scope` (legacy `server not in group` when only groups exclude) | `{tools: [{name, description}]}`; denied omitted | 404 server/group; 403 scope; 401 auth; 502 downstream |
+| `GET /servers/{name}/tools/{tool}` | `?group=&servers=&exclude=` scope gate | `{name, description, inputSchema}`; match case-insensitive; deny checked pre-downstream | 404 server/denied/unknown/group; 403 scope; 401/502 |
+| `POST /servers/{name}/tools/{tool}` | `{parameters: {...}}`, body cap 64 MiB, empty ⇒ nil; `?group=&servers=&exclude=` scope gate | `{content: [...], isError, structuredContent?, _meta?}` | 404; 403 policy/param/scope block; 400 bad JSON; 401; 502 |
+| `GET /servers/{name}/resources` | `?group=&servers=&exclude=` scope gate | `{resources: [{uri, name, description, mimeType}], instructions}`; unsupported ⇒ `{resources: [], instructions}` | 404; 403 scope; 401/502 |
+| `GET /servers/{name}/resources/{uri…}` | tail or `?uri=`, exactly one (+ scope keys; `?uri=` shares the query) | `{contents: [...]}` | 400 both/neither; `..` ⇒ 502; 403 scope; 401/502 |
+| `GET /servers/{name}/prompts` | `?group=&servers=&exclude=` scope gate | `{prompts: [{name, description, arguments}]}`; unsupported ⇒ `{prompts: []}` | 404; 403 scope; 401/502 |
+| `GET /tools` | `?q=&server=&group=&servers=&exclude=&regex=&limit=&offset=` (defaults 12/0; `regex` truthy `1`/`true`; numeric-prefix ints) | `{tools: [{server, name, description, score}], total, nextOffset}`; empty q ⇒ `[]`; scope filters post-page (total pre-filter, same as group) | 400 unknown server/bad regex; 404 unknown group |
+| `GET /health` | — (scope ignored: global view, never spawns) | `{servers: {name: {connected, healthy?, error?, auth_required?}}}`; error redacted; never spawns | gate only |
 | `POST /reload` | — | `{added, removed, modified}` | 500 load failure; GET ⇒ 405 |
-| `POST /servers/{name}/refresh` | — (group param ignored: refresh is per-server, not per-view) | `{tools: [names], added: [...], removed: [...]}` (live vs old baseline); failure changes nothing | 404 unknown server; 401 auth; 502 downstream |
+| `POST /servers/{name}/refresh` | — (scope ignored: operator thaw, not per-view) | `{tools: [names], added: [...], removed: [...]}` (live vs old baseline); failure changes nothing | 404 unknown server; 401 auth; 502 downstream |
 Resources/prompts are live passthrough (they spawn cold servers; no disk
 cache — bodies are live data). Servers without support return `[]`.
 Instructions ride the resource list even for tools-only servers.
+Scope matching: exact IDs or `*`/`?` globs, case-insensitive (same engine as
+tools `allow`/`deny`); qualified names (`peer:server`, `local:name`) match on
+user-facing name + leaf + canonical key; `exclude` wins over `servers`; `servers`
+empty = allow-all; `group` ANDs with both.
 
 #### Scenario: Cold list never spawns
 
@@ -80,6 +90,40 @@ Instructions ride the resource list even for tools-only servers.
 *Definition of Done: If this scenario passes, the requirement is met.*
 
 Verification: `V-HTTP-001`.
+
+### Requirement: Per-client server scope
+
+The system MUST enforce `group` + `servers` + `exclude` as one ANDed
+per-request view (`internal/daemon/scope.go: InScope`): `group` = curated
+`[groups.*]` subset (unknown → 404, fail closed), `servers` = whitelist
+globs (empty = all), `exclude` = blacklist globs (deny wins over everything).
+Lists (`GET /servers`, `GET /tools`) skip out-of-scope servers; single-server
+routes 403 with `server not in scope` (legacy `server not in group` when only
+groups exclude); search filters post-page (total stays pre-filter, same as
+group). `GET /health` and `POST /refresh` ignore scope (global health,
+operator thaw).
+
+**As a** folder-scoped client
+**I want** 10 connected servers but only 5 visible here, or all-except-2 there
+**So that** one daemon serves every project without leaking context.
+
+| Surface | Whitelist | Blacklist | Example |
+|---|---|---|---|
+| CLI | `--servers` / `OXYP_SERVERS` | `--exclude` / `OXYP_EXCLUDE` | `oxyp servers --servers github,linear --exclude '*-prod'` |
+| shim (stdio) | `--servers` / `OXYP_SERVERS` | `--exclude` / `OXYP_EXCLUDE` | `{command: [oxyp, shim], args: [--exclude, gamma]}` — fixed per client |
+| REST | `?servers=` | `?exclude=` | `GET /servers?servers=github,wsl:*&exclude=gamma` |
+| `POST /mcp` | `servers` arg → `?servers=` → env | `exclude` arg → `?exclude=` → env | `{servers: "github,linear"}` or `POST /mcp?exclude=gamma` |
+
+#### Scenario: Folder sees 5 of 10
+
+- **GIVEN** 10 servers connected
+- **WHEN** a client runs with `OXYP_SERVERS="a,b,c,d,e"` (or `?servers=a,b,c,d,e`)
+- **THEN** `list_servers` returns 5, `call` on the 6th 403s `server not in scope`,
+  and another client without env still sees 10.
+
+*Definition of Done: If one client's scope leaks into another, the system is broken.*
+
+Verification: `V-HTTP-007` (scope gate + post-page filter + precedence).
 
 ### Requirement: CSRF / token gate
 
@@ -155,15 +199,17 @@ see the CLI spec). All errors use code `-32000`.
 **I want** the strictest-common-denominator server
 **So that** one `{command: [oxyp, shim]}` line works everywhere.
 
-The five tools: `list_servers` (optional `filter`/`group`), `list_tools`
-(`server` required, `group` gates), `describe_tool` (`server` + `tools[]`;
+The five tools: `list_servers` (optional `filter`/`group`/`servers`/`exclude`), `list_tools`
+(`server` required, `group`/`servers`/`exclude` gate), `describe_tool` (`server` + `tools[]` + optional `group`/`servers`/`exclude`;
 skips empty/non-strings; N sequential GETs, first failure aborts),
-`call` (`server` + `tool`, `parameters` non-map ⇒ `{}`),
-`search_tools` (`query` required non-empty; optional `server`/`group`/
-`regex`/`limit`/`offset`, non-positive numbers ignored). Discovery results are
+`call` (`server` + `tool` + optional `group`/`servers`/`exclude`, `parameters` non-map ⇒ `{}`),
+`search_tools` (`query` required non-empty; optional `server`/`group`/`servers`/
+`exclude`/`regex`/`limit`/`offset`, non-positive numbers ignored). Discovery results are
 JSON-in-text; only `call` preserves `structuredContent`/`_meta`.
-`--group` (or `OXYP_GROUP`) appends `?group=` to every daemon call;
-unknown group surfaces the daemon 404 as a tool error.
+`--group/--servers/--exclude` (or `OXYP_GROUP` / `OXYP_SERVERS` / `OXYP_EXCLUDE`) append
+`?group=&servers=&exclude=` to every daemon call — one fixed view per shim
+process, so the agent can't widen its own sandbox;
+unknown group surfaces the daemon 404 as a tool error, outside scope 403s.
 POST failures render `"<error> (<auth_required>)"`; GET failures embed the
 raw daemon body. Path segments are `PathEscape`d; queries use
 `url.Values`. The shim itself writes nothing to stderr (daemon drains
@@ -171,10 +217,13 @@ child stderr into its log, redacted).
 
 `POST /mcp` serves the same 5 tools over Streamable HTTP for URL-only
 clients (mcp-go `NewStreamableHTTPServer`, stateful sessions). Handlers call
-the daemon directly (no HTTP loopback): same deny/param/group gates, same
-guard, same cold semantics. `group` rides per-tool args (`list_servers`,
-`list_tools`, `search_tools`) or `OXYP_GROUP` (describe/call, one group per
-client). Tool failures return `isError` content (never bare JSON-RPC errors)
+the daemon directly (no HTTP loopback): same deny/param/scope gates, same
+guard, same cold semantics. Scope resolves per call: explicit tool args
+(`group`/`servers`/`exclude`, comma string or array) win over
+`POST /mcp?group=&servers=&exclude=` query, which wins over
+`OXYP_GROUP` / `OXYP_SERVERS` / `OXYP_EXCLUDE` env — each dimension
+independently (explicit `""` clears that dimension). `servers`/`exclude`
+accept `*`/`?` globs; `exclude` wins. Tool failures return `isError` content (never bare JSON-RPC errors)
 so model clients read and recover.
 
 #### Scenario: One-line attach lists tools instantly

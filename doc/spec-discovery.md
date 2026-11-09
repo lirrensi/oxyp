@@ -1,30 +1,34 @@
 ---
 node_type: spec
-title: Discovery — Metacache, Search, and Permissions
+title: Discovery — Metacache, Search, Permissions, and Views
 status: active
-updated: 2026-10-30
-tags: [metacache, search, permissions, discovery]
+updated: 2026-11-09
+tags: [metacache, search, permissions, discovery, scope]
 links:
   depends_on: [/overview.md, /spec-daemon.md]
-  documents: [/internal/metacache/, /internal/search/, /internal/perms/]
+  documents: [/internal/metacache/, /internal/search/, /internal/perms/, /internal/daemon/scope.go]
   verified_by: [/verification/strategy.md]
 ---
 
-# Discovery Behavior (Metacache + Search + Permissions)
+# Discovery Behavior (Metacache + Search + Permissions + Views)
 
 ## Purpose
 
 This spec covers how oxyp remembers tool metadata (disk cache), how it ranks
-searches without spawning, and how allow/deny globs hide tools. Together
-they deliver the "cold, searchable, deny-means-invisible" promise: an agent
+searches without spawning, how allow/deny globs hide tools, and how per-client
+views hide servers. Together
+they deliver the "cold, searchable, deny-means-invisible, one-daemon-many-views"
+promise: an agent
 can explore hundreds of tools without waking a single downstream server,
-and a denied tool is invisible everywhere and blocked at invocation.
+a denied tool is invisible everywhere and blocked at invocation, and one
+folder's 5-server view never leaks into another's 10-server view.
 
 ## Boundaries
 
 **Handles:** cache file format and validity, invalidation triggers,
 word/regex ranking, pagination, glob semantics, invisible+blocked
-enforcement, `enabled = false`.
+enforcement, per-client server views (`group`/`servers`/`exclude`),
+`enabled = false`.
 **Explicitly does NOT:** lifecycle/idle (see
 [/spec-daemon.md](/spec-daemon.md)), HTTP/shim envelopes (see
 [/spec-http-shim.md](/spec-http-shim.md)).
@@ -325,6 +329,28 @@ per-server, not per-credential.
 system is broken.*
 
 Verification: `V-DISC-010` (new: passthrough precedence unit).
+
+### Requirement: Per-client server views
+
+`group` + `servers` + `exclude` MUST compose as one ANDed presentation filter
+(`daemon.InScope`): denied tools stay hidden (this spec), out-of-scope servers
+stay hidden (HTTP spec). Search excludes out-of-scope hits post-page (total
+stays pre-filter, same as group); list skips them; single-server routes 403.
+Scope is presentation-time only — excluded from the fingerprint, no cache
+invalidation needed, no spawn behavior change (a hidden cold server stays
+cold; a hidden connected server stays connected, just invisible to this
+request).
+
+#### Scenario: Hidden server stays hidden but healthy
+
+- **GIVEN** servers `a` (connected) and `b` (cold) with `?exclude=b`
+- **WHEN** listing, searching, or calling `b`
+- **THEN** `b` vanishes from list/search and 403s on call, while `a` still
+  works and `b`'s connection (if any) is untouched.
+
+*Definition of Done: If scope drops connections or needs a reload, it's broken.*
+
+Verification: `V-DISC-012` (scope is view-only).
 
 ## Data Contracts
 

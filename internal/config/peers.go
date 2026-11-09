@@ -21,6 +21,9 @@ const (
 // The key IS the name — no `name =` field inside an entry.
 // Peers expand to N virtual servers; auth stays on the owner.
 type PeerEntry struct {
+	// Description is free text for humans (shows in peers list).
+	// Example: "wsl box - holds linear token".
+	Description string `toml:"description"`
 	// URL is the peer daemon's base URL (http(s)://host:port).
 	URL string `toml:"url"`
 	// Token is the peer daemon's bearer token (empty = loopback trust).

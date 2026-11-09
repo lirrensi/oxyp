@@ -2,7 +2,7 @@
 node_type: spec
 title: Federation — Peer Daemons, Virtual Servers, Sharing
 status: active
-updated: 2026-11-08
+updated: 2026-11-09
 tags: [federation, peers, virtual-servers, sharing]
 links:
   depends_on: [/overview.md, /spec-daemon.md, /spec-discovery.md, /spec-http-shim.md]
@@ -68,7 +68,9 @@ optional `daemon.name` on `/health` and `/peer`.
 `peers add` MUST refuse self-mount (instance match or loop-508), duplicate
 URLs, and duplicate instances (parallel bounded sweep, `--force` overrides);
 `peers remove` MUST cut the table byte-precisely; `peers list`/`sync` are
-thin views over config/reload.
+thin views over config/reload. `peers add --description` stores free text
+(`description = "wsl box - holds linear token"`, shows in `peers list`);
+empty stays empty with a tip, never a block.
 
 ### Requirement: Virtual servers and naming
 
@@ -106,7 +108,10 @@ peers through `[daemon.peer_sharing]`: `hide` (default, locals only) |
 `show` (+ virtuals), `allow`/`deny` globs matching route OR leaf (deny
 wins), and origin `transitive` consent per leaf (default false — both sides
 veto). Hidden servers MUST 404 indistinguishably for header-sending peers
-(listings, health, search, direct access).
+(listings, health, search, direct access). Per-client scope (`group` /
+`servers` / `exclude`) ANDs with sharing on the importer: a peer-mounted
+server outside your `?servers=` still 403s `server not in scope`, even when
+the owner would share it.
 
 **As a** daemon owner
 **I want** my peers' servers to stay mine unless I opt in twice

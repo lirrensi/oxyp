@@ -2,8 +2,8 @@
 node_type: spec
 title: CLI — Commands, Doctor, Add, and Import
 status: active
-updated: 2026-10-30
-tags: [cli, doctor, add, import, connectors]
+updated: 2026-11-09
+tags: [cli, doctor, add, import, connectors, scope]
 links:
   depends_on: [/overview.md, /spec-daemon.md, /spec-http-shim.md]
   documents: [/cmd/oxyp/, /internal/importcfg/]
@@ -54,24 +54,29 @@ beats all dir resolution): `daemon`, `call`, `servers`, `tools`, `search`,
 | Command | Args / flags | Action |
 |---|---|---|
 | `daemon` | `--dir` only | foreground daemon (trace, 10/30/60/120 s HTTP, 0600 endpoint, SIGHUP, 10 s shutdown) |
-| `call` | `<server> <tool> [json]`; `--group` | `POST /servers/{s}/tools/{t}[?group=]` `{parameters}`; bad JSON → `bad json args`; ≥400 → exit 1 |
-| `servers` | `--filter/--group` | `GET /servers[?filter=&group=]` |
-| `tools` | `<server>`; `--group` | `GET /servers/{s}/tools[?group=]` |
-| `search` | `<query>`; `--server/--group/--regex/--limit=12/--offset=0` | `GET /tools?…`; cached metadata, never spawns |
-| `describe` | `<server> <tool>`; `--group` | `GET /servers/{s}/tools/{t}[?group=]` |
-| `status` | — | `GET /health` (ignores HTTP status) |
+| `call` | `<server> <tool> [json]`; `--group/--servers/--exclude` | `POST /servers/{s}/tools/{t}[?group=&servers=&exclude=]` `{parameters}`; bad JSON → `bad json args`; ≥400 → exit 1 |
+| `servers` | `--filter/--group/--servers/--exclude` | `GET /servers[?filter=&group=&servers=&exclude=]` |
+| `tools` | `<server>`; `--group/--servers/--exclude` | `GET /servers/{s}/tools[?group=&servers=&exclude=]` |
+| `search` | `<query>`; `--server/--group/--servers/--exclude/--regex/--limit=12/--offset=0` | `GET /tools?…`; cached metadata, never spawns |
+| `describe` | `<server> <tool>`; `--group/--servers/--exclude` | `GET /servers/{s}/tools/{t}[?group=&servers=&exclude=]` |
+| `status` | — (scope ignored: global health) | `GET /health` (ignores HTTP status) |
 | `reload` | — | `POST /reload`; ≥400 → exit 1 |
 | `refresh` | `<server>` | `POST /servers/{s}/refresh`; prints `{tools, added, removed}`; failed fetch changes nothing; ≥400 → exit 1 |
 | `stop` | — | SIGTERM endpoint PID, wait ~5 s (then SIGKILL), remove endpoint; not-running → `daemon not running`, exit 0 |
 | `restart` | — | `stop` (tolerates not-running) then autostart; prints new PID |
-| `shim` | `--group` | stdio JSON-RPC ↔ daemon HTTP; `OXYP_GROUP` default; `?group=` on every call |
+| `shim` | `--group/--servers/--exclude` | stdio JSON-RPC ↔ daemon HTTP; `OXYP_GROUP`/`OXYP_SERVERS`/`OXYP_EXCLUDE` defaults; `?group=&servers=&exclude=` on every call (one fixed view per client) |
 | `login` | `<server>`; `--complete <url-or-code>` | flow dispatch, 5 min ctx; port rules per OAuth spec |
 | `doctor` | `--live/--json` | offline validation (+ group member audit) or 15 s-per-server live probe (+ pin/hide drift notes) |
 | `add` | `<url>`; `--name/--write` | probe + append `[servers.<name>]` |
 | `import` | `--from all\|cursor\|claude\|vscode\|opencode\|omp`; `--write` | preview + append foreign servers |
 
-`--group` resolves over `OXYP_GROUP` env (`cliGroup`: flag wins, env is the
-default; one group per client invocation).
+`--group` resolves over `OXYP_GROUP` env, `--servers` over `OXYP_SERVERS`,
+`--exclude` over `OXYP_EXCLUDE` (`cliGroup`/`cliServers`/`cliExclude`: flag
+wins, env is the default; one view per client invocation). All three AND
+together; `exclude` wins over `servers`; globs (`*`/`?`, case-insensitive)
+match display + leaf + canonical. Unknown group → 404, outside scope → 403
+(`server not in scope`). `status`/`doctor`/`refresh` ignore scope (global /
+operator surfaces).
 Shared: 60 s HTTP client, bearer from `daemon.json` (or `OXYP_TOKEN` in
 remote mode), pretty JSON print, `exit 1` on Cobra errors and checked
 ≥400s. Autostart: read endpoint (reject empty URL / `PID ≤ 0` / dead
@@ -153,15 +158,18 @@ Verification: `V-CLI-002`.
 `add` MUST derive/sanitize a unique name (`--name` trimmed + sanitized, or
 `NameFromURL`: valid `http(s)://` + host, strip `www.`, dots→dashes, drop
 port; `UniqueName` → `base`, `base-2`, …), build a URL-only entry
-(`description = "Added via oxyp add"`, never `auth = "oauth"`), probe it
+(`description = --description` or `"Added via oxyp add"` when empty, never
+`auth = "oauth"`), probe it
 through an in-process daemon (15 s budget): other-errors abort with no
 write; `needs-auth` still writes with notes. It MUST always preview
 (`<name>: ok (N tools)` or `needs-auth…` + exact TOML block), then write
 only on `--write` or an interactive `y`/`yes` (EOF/error = no; decline
-prints `not written`, exit 0). Append uses `AppendBlocks` (create 0600,
-tighten group/world-readable to 0600 with a note), prints
+prints `not written`, exit 0). Append uses `AppendBlocks` (new files start
+with `DefaultHeader` self-guide + 0600; existing 0600 kept, looser
+tightened to 0600 with a note), prints
 `added [servers.<name>] to <path>` plus `next: oxyp login <name>` when
-gated.
+gated, plus a `tip: re-run with --description …` hint when no description
+was given.
 
 **As a** operator
 **I want** paste-URL → working server

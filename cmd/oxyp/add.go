@@ -56,10 +56,10 @@ func takenNames(cfg *config.Config) map[string]bool {
 }
 
 func addCmd() *cobra.Command {
-	var nameFlag string
+	var nameFlag, descFlag string
 	var writeFlag bool
 	c := &cobra.Command{
-		Use:   "add <url> [--name]",
+		Use:   "add <url> [--name] [--description]",
 		Short: "validate + probe a remote URL and append a [servers.<name>] entry",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -86,8 +86,12 @@ func addCmd() *cobra.Command {
 			}
 			name := importcfg.UniqueName(base, takenNames(cfg))
 
+			desc := strings.TrimSpace(descFlag)
+			if desc == "" {
+				desc = "Added via oxyp add"
+			}
 			entry := config.ServerEntry{
-				Description: "Added via oxyp add",
+				Description: desc,
 				URL:         rawurl,
 			}
 
@@ -153,10 +157,14 @@ func addCmd() *cobra.Command {
 			if _, _, rerr := apiCall("POST", "/reload", nil); rerr == nil {
 				fmt.Fprintln(os.Stderr, "reloaded: server lists now")
 			}
+			if strings.TrimSpace(descFlag) == "" {
+				fmt.Fprintln(os.Stderr, "tip: re-run with --description \"what is this for, which corp?\" or edit oxyp.toml (description shows in servers/search)")
+			}
 			return nil
 		},
 	}
 	c.Flags().StringVar(&nameFlag, "name", "", "server name (default: derived from URL hostname)")
+	c.Flags().StringVar(&descFlag, "description", "", "what is this for, which corp/env? (shows in servers/search, so nobody forgets)")
 	c.Flags().BoolVar(&writeFlag, "write", false, "write without prompting")
 	return c
 }

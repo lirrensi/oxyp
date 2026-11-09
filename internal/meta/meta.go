@@ -82,6 +82,11 @@ func New(d *daemon.Daemon, reload func() (added, removed, modified []string, err
 			if peerfederation.IsPeerRequest(r) {
 				ctx = peerfederation.WithPeer(ctx)
 			}
+			// Per-client view for URL-only clients: POST /mcp?group=&servers=&exclude=
+			// rides in ctx as the query layer (tool args win, env is default).
+			if scope := daemon.ParseScope(r.URL.Query()); !scope.IsEmpty() {
+				ctx = withGatewayQuery(ctx, scope)
+			}
 			return ctx
 		})))
 	return s
@@ -209,6 +214,33 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// scopeDenyMessage keeps the legacy "server not in group" wording when the
+// group alone excludes the server, and uses "server not in scope" when the
+// servers/exclude lists are involved. Both are 403; the split keeps old
+// clients/tests green while telling new users which knob fired.
+func scopeDenyMessage(scope daemon.Scope) string {
+	if len(scope.Allow) == 0 && len(scope.Deny) == 0 {
+		return "server not in group"
+	}
+	return "server not in scope"
+}
+
+// scopeGate enforces group+servers+exclude on a single-server route.
+// Unknown group → 404; outside scope → 403. True = proceed.
+func (s *Server) scopeGate(w http.ResponseWriter, scope daemon.Scope, name string) bool {
+	if scope.Group != "" {
+		if _, ok := s.d.GroupMembers(scope.Group); !ok {
+			writeErr(w, http.StatusNotFound, "group not found")
+			return false
+		}
+	}
+	if !s.d.InScope(scope, name) {
+		writeErr(w, http.StatusForbidden, scopeDenyMessage(scope))
+		return false
+	}
+	return true
+}
+
 type serverInfo struct {
 	Name         string   `json:"name"`
 	Description  string   `json:"description"`
@@ -225,9 +257,9 @@ type serverInfo struct {
 
 func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 	filter := strings.ToLower(r.URL.Query().Get("filter"))
-	group := r.URL.Query().Get("group")
-	if group != "" {
-		if _, ok := s.d.GroupMembers(group); !ok {
+	scope := daemon.ParseScope(r.URL.Query())
+	if scope.Group != "" {
+		if _, ok := s.d.GroupMembers(scope.Group); !ok {
 			writeErr(w, http.StatusNotFound, "group not found")
 			return
 		}
@@ -241,7 +273,7 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 	}
 	var out []serverInfo
 	for _, name := range names {
-		if !s.d.InGroup(group, name) {
+		if !s.d.InScope(scope, name) {
 			continue
 		}
 		if peerView && !s.d.SharedWithPeer(name) {
@@ -301,12 +333,8 @@ type toolStub struct {
 
 func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if group := r.URL.Query().Get("group"); group != "" && !s.d.InGroup(group, name) {
-		if _, ok := s.d.GroupMembers(group); !ok {
-			writeErr(w, http.StatusNotFound, "group not found")
-		} else {
-			writeErr(w, http.StatusForbidden, "server not in group")
-		}
+	scope := daemon.ParseScope(r.URL.Query())
+	if !s.scopeGate(w, scope, name) {
 		return
 	}
 	e := s.d.Entry(name)
@@ -331,12 +359,7 @@ func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request) {
 	name, tool := r.PathValue("name"), r.PathValue("tool")
-	if group := r.URL.Query().Get("group"); group != "" && !s.d.InGroup(group, name) {
-		if _, ok := s.d.GroupMembers(group); !ok {
-			writeErr(w, http.StatusNotFound, "group not found")
-		} else {
-			writeErr(w, http.StatusForbidden, "server not in group")
-		}
+	if !s.scopeGate(w, daemon.ParseScope(r.URL.Query()), name) {
 		return
 	}
 	e := s.d.Entry(name)
@@ -371,6 +394,9 @@ func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request) {
 // Servers without resources support return {"resources": []}.
 func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if !s.scopeGate(w, daemon.ParseScope(r.URL.Query()), name) {
+		return
+	}
 	if s.d.Entry(name) == nil || (peerfederation.IsPeer(r.Context()) && !s.d.SharedWithPeer(name)) {
 		writeErr(w, http.StatusNotFound, "server not found")
 		return
@@ -402,6 +428,10 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 // exactly one must identify the resource.
 func (s *Server) handleReadResource(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	// ?uri= shares the query with scope keys; scope parsing ignores it.
+	if !s.scopeGate(w, daemon.ParseScope(r.URL.Query()), name) {
+		return
+	}
 	if s.d.Entry(name) == nil || (peerfederation.IsPeer(r.Context()) && !s.d.SharedWithPeer(name)) {
 		writeErr(w, http.StatusNotFound, "server not found")
 		return
@@ -430,6 +460,9 @@ func (s *Server) handleReadResource(w http.ResponseWriter, r *http.Request) {
 // prompts support return {"prompts": []}.
 func (s *Server) handleListPrompts(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if !s.scopeGate(w, daemon.ParseScope(r.URL.Query()), name) {
+		return
+	}
 	if s.d.Entry(name) == nil || (peerfederation.IsPeer(r.Context()) && !s.d.SharedWithPeer(name)) {
 		writeErr(w, http.StatusNotFound, "server not found")
 		return
@@ -468,9 +501,9 @@ func isUnsupported(err error) bool {
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	group := q.Get("group")
-	if group != "" {
-		if _, ok := s.d.GroupMembers(group); !ok {
+	scope := daemon.ParseScope(q)
+	if scope.Group != "" {
+		if _, ok := s.d.GroupMembers(scope.Group); !ok {
 			writeErr(w, http.StatusNotFound, "group not found")
 			return
 		}
@@ -491,7 +524,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	peerView := peerfederation.IsPeer(r.Context())
 	out := []map[string]any{}
 	for _, h := range hits {
-		if !s.d.InGroup(group, h.Server) {
+		if !s.d.InScope(scope, h.Server) {
 			continue
 		}
 		if peerView && !s.d.SharedWithPeer(h.Server) {
@@ -518,15 +551,8 @@ func atoiOr(s string, dflt int) int {
 
 func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	name, tool := r.PathValue("name"), r.PathValue("tool")
-	if group := r.URL.Query().Get("group"); group != "" {
-		if _, ok := s.d.GroupMembers(group); !ok {
-			writeErr(w, http.StatusNotFound, "group not found")
-			return
-		}
-		if !s.d.InGroup(group, name) {
-			writeErr(w, http.StatusForbidden, "server not in group")
-			return
-		}
+	if !s.scopeGate(w, daemon.ParseScope(r.URL.Query()), name) {
+		return
 	}
 	e := s.d.Entry(name)
 	if e == nil || (peerfederation.IsPeer(r.Context()) && !s.d.SharedWithPeer(name)) {

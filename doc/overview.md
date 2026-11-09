@@ -2,7 +2,7 @@
 node_type: overview
 title: oxyp Overview and Architecture
 status: active
-updated: 2026-10-30
+updated: 2026-11-09
 tags: [overview, architecture, gateway, mcp]
 links:
   depends_on: [/PHILOSOPHY.md]
@@ -56,22 +56,26 @@ server mode exists (future work).
 
 ## System map
 
-```
+```text
 MCP clients (hermes / omp / opencode) — URL-only clients via POST /mcp
   │  stdio JSON-RPC (shim) or Streamable HTTP (/mcp): initialize / tools/list / tools/call / ping
   ▼
 oxyp shim (cmd/oxyp/shim.go) — 5 static meta-tools, stdout pure JSONL
-  │  HTTP + bearer (60 s client), autostarts daemon if needed; --group / OXYP_GROUP scopes
+  │  HTTP + bearer (60 s client), autostarts daemon if needed; --group/--servers/--exclude scopes
+  │  (flags over OXYP_GROUP/OXYP_SERVERS/OXYP_EXCLUDE; one view per client, agent can't escape)
   ▼
 daemon HTTP API (internal/meta) — 11 routes + auth gate
   │  bearer → Host → Origin → Content-Type
+  │  per-request scope: ?group=&servers=&exclude= (deny wins, unknown group 404, outside 403)
   │  POST /mcp = same 5 meta-tools over Streamable HTTP (internal/meta/mcp.go)
+  │  (tool args group/servers/exclude over ?query over env; InScope ANDs with sharing)
   ▼
-Daemon (internal/daemon) — lifecycle, spawn, health, cache, OAuth, probe, groups
+Daemon (internal/daemon) — lifecycle, spawn, health, cache, OAuth, probe, groups+scope
   ├── local stdio children (mcp-go, 30 s init / 10 s RPC / 3 s ping; per-server tool_timeout)
   ├── remote Streamable HTTP + legacy SSE fallback (remhttp client; token_header remap)
   ├── metacache (<dir>/cache.json) — tool metadata, fingerprint-keyed; pinned / new_tools=hide
   ├── OAuth store (<dir>/oauth/) — daemon-held tokens + DCR sidecar; authorization_url override
+  ├── scope (internal/daemon/scope.go) — group + allow/exclude globs (*, ?, case-insensitive); deny wins
   ├── params gates ([servers.x.params] → 403 param-blocked)
   └── spill files (os.TempDir()/oxyp-output-*.txt, 0600, pruned)
 Config: <dir>/oxyp.toml (+ [groups.*]) + <dir>/connectors/  Endpoint: <dir>/daemon.json
@@ -82,17 +86,22 @@ Dir precedence: --dir > OXYP_DIR > XDG_CONFIG_HOME/oxyp > ~/.oxyp
 
 | Component | Code | Spec |
 |---|---|---|
-| Daemon lifecycle, health, reload, idle sweep, endpoint | `internal/daemon`, `cmd/oxyp/main.go` | [/spec-daemon.md](/spec-daemon.md) |
-| Tool metadata cache, ranked search, permissions | `internal/metacache`, `internal/search`, `internal/perms` | [/spec-discovery.md](/spec-discovery.md) |
+| Daemon lifecycle, health, reload, idle sweep, endpoint, per-client scope | `internal/daemon` (+ `scope.go`), `cmd/oxyp/main.go` | [/spec-daemon.md](/spec-daemon.md) |
+| Tool metadata cache, ranked search, permissions + scope filtering | `internal/metacache`, `internal/search`, `internal/perms` | [/spec-discovery.md](/spec-discovery.md) |
 | Daemon-held OAuth (4 flows), DCR sidecar, auto-detect | `internal/oauth`, `internal/daemon/login.go` | [/spec-oauth.md](/spec-oauth.md) |
-| HTTP API, CSRF/token policy, shim, media passthrough | `internal/meta`, `cmd/oxyp/shim.go` | [/spec-http-shim.md](/spec-http-shim.md) |
+| HTTP API, CSRF/token policy, shim, per-client views, media passthrough | `internal/meta`, `cmd/oxyp/shim.go` | [/spec-http-shim.md](/spec-http-shim.md) |
 | Output guard/spill, trace, redaction, HTTP transport, secret expansion, config schema | `internal/outguard`, `internal/ptrace`, `internal/redact`, `internal/remhttp`, `internal/config` | [/spec-guard.md](/spec-guard.md) |
-| CLI (16 commands), doctor, add, import, connectors | `cmd/oxyp`, `internal/importcfg` | [/spec-cli.md](/spec-cli.md) |
+| CLI (16 commands, scope flags), doctor, add, import, connectors | `cmd/oxyp`, `internal/importcfg` | [/spec-cli.md](/spec-cli.md) |
+| Federation (peer daemons, virtual servers, sharing) + scope ANDs with sharing | `internal/daemon/peers.go`, `internal/peerfederation/` | [/spec-federation.md](/spec-federation.md) |
 | Compat batteries (stdio/HTTP/OAuth/TLS zoo servers) | `zoo/` | [/ZOO.md](/ZOO.md), [/verification/strategy.md](/verification/strategy.md) |
-| Client attach shapes (opencode/omp/hermes) | — (docs) | [/CLIENTS.md](/CLIENTS.md) |
-| Stances (secrets, portability, no approval prompts) | — (docs) | [/PHILOSOPHY.md](/PHILOSOPHY.md) |
+| Client attach shapes (opencode/omp/hermes) + per-folder views | — (docs) | [/CLIENTS.md](/CLIENTS.md) |
+| Stances (secrets, portability, no approval prompts, views-not-tenants) | — (docs) | [/PHILOSOPHY.md](/PHILOSOPHY.md) |
 
-## Key facts (code-accurate as of 2026-10-30)
+## Why oxyp vs a plain multiplexer
+
+> Plain multiplexers fan out stdio. oxyp is a **lazy gateway + search engine + OAuth vault + federated mesh + per-client views** — see `README.md#features--more-than-a-multiplexer` for the full table. This doc stays code-accurate; the README stays persuasive.
+
+## Key facts (code-accurate as of 2026-11-09)
 
 - Default bind `127.0.0.1:8379`; empty token means loopback trust ONLY —
   a non-loopback addr with an empty token fails `config.Load`.
@@ -102,6 +111,13 @@ Dir precedence: --dir > OXYP_DIR > XDG_CONFIG_HOME/oxyp > ~/.oxyp
   probe 15 s per server.
 - The shim AND `POST /mcp` expose exactly **5** meta-tools (`list_servers`,
   `list_tools`, `describe_tool`, `call`, `search_tools`).
+- Per-client scope travels per request, never daemon-global: `--group` /
+  `--servers` / `--exclude` flags over `OXYP_GROUP` / `OXYP_SERVERS` /
+  `OXYP_EXCLUDE` env (CLI + shim, one view per client), `?group=&servers=&exclude=`
+  query (REST, comma-separated + repeatable, `*`/`?` globs, deny wins), and
+  `group` / `servers` / `exclude` tool args over `?query` over env (`POST /mcp`).
+  Unknown group → 404, outside scope → 403 (`server not in scope`; legacy
+  `server not in group` when only groups exclude). `/health` stays global.
 - Redirects: up to **4** redirects followed (5 requests total); cross-origin
   keeps only `Accept`, `Content-Type`, `Mcp-Session-Id`,
   `MCP-Protocol-Version`.

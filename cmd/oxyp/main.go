@@ -31,6 +31,7 @@ import (
 
 	"github.com/lirrensi/oxyp/internal/config"
 	"github.com/lirrensi/oxyp/internal/daemon"
+	"github.com/lirrensi/oxyp/internal/importcfg"
 	"github.com/lirrensi/oxyp/internal/meta"
 	"github.com/lirrensi/oxyp/internal/oauth"
 	peerfederation "github.com/lirrensi/oxyp/internal/peerfederation"
@@ -158,6 +159,9 @@ func daemonCmd() *cobra.Command {
 				return err
 			}
 			dir := oxypDir()
+			if err := importcfg.EnsureDefaultFile(dir); err != nil {
+				return err
+			}
 			cfg, err := config.Load(dir)
 			if err != nil {
 				return err
@@ -498,7 +502,7 @@ func printJSON(b []byte) {
 // --- CLI commands ---
 
 func callCmd() *cobra.Command {
-	var group string
+	var group, servers, exclude string
 	c := &cobra.Command{
 		Use:   "call <server> <tool> [json-args]",
 		Short: "invoke a tool via the daemon (autostarts it)",
@@ -511,9 +515,7 @@ func callCmd() *cobra.Command {
 				}
 			}
 			path := fmt.Sprintf("/servers/%s/tools/%s", url.PathEscape(args[0]), url.PathEscape(args[1]))
-			if g := cliGroup(group); g != "" {
-				path += "?group=" + url.QueryEscape(g)
-			}
+			path = withScopeQuery(path, scopeValues(group, servers, exclude))
 			b, code, err := apiCall("POST", path, map[string]any{"parameters": params})
 			if err != nil {
 				return err
@@ -526,11 +528,13 @@ func callCmd() *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&group, "group", "", "curated subset ([groups.*]); OXYP_GROUP also works")
+	c.Flags().StringVar(&servers, "servers", "", "whitelist: only these servers (comma-separated IDs/globs); OXYP_SERVERS also works")
+	c.Flags().StringVar(&exclude, "exclude", "", "blacklist: hide these servers (comma-separated IDs/globs, deny wins); OXYP_EXCLUDE also works")
 	return c
 }
 
 func serversCmd() *cobra.Command {
-	var filter, group string
+	var filter, group, servers, exclude string
 	c := &cobra.Command{
 		Use:   "servers",
 		Short: "list servers",
@@ -539,8 +543,8 @@ func serversCmd() *cobra.Command {
 			if filter != "" {
 				vals.Set("filter", filter)
 			}
-			if g := cliGroup(group); g != "" {
-				vals.Set("group", g)
+			for k, v := range scopeValues(group, servers, exclude) {
+				vals[k] = v
 			}
 			path := "/servers"
 			if len(vals) > 0 {
@@ -559,20 +563,20 @@ func serversCmd() *cobra.Command {
 	}
 	c.Flags().StringVar(&filter, "filter", "", "filter by name/description")
 	c.Flags().StringVar(&group, "group", "", "curated subset ([groups.*]); OXYP_GROUP also works")
+	c.Flags().StringVar(&servers, "servers", "", "whitelist: only these servers (comma-separated IDs/globs); OXYP_SERVERS also works")
+	c.Flags().StringVar(&exclude, "exclude", "", "blacklist: hide these servers (comma-separated IDs/globs, deny wins); OXYP_EXCLUDE also works")
 	return c
 }
 
 func toolsCmd() *cobra.Command {
-	var group string
+	var group, servers, exclude string
 	c := &cobra.Command{
 		Use:   "tools <server>",
 		Short: "list tools (thin)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			path := "/servers/" + url.PathEscape(args[0]) + "/tools"
-			if g := cliGroup(group); g != "" {
-				path += "?group=" + url.QueryEscape(g)
-			}
+			path = withScopeQuery(path, scopeValues(group, servers, exclude))
 			b, code, err := apiCall("GET", path, nil)
 			if err != nil {
 				return err
@@ -585,11 +589,13 @@ func toolsCmd() *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&group, "group", "", "curated subset ([groups.*]); OXYP_GROUP also works")
+	c.Flags().StringVar(&servers, "servers", "", "whitelist: only these servers (comma-separated IDs/globs); OXYP_SERVERS also works")
+	c.Flags().StringVar(&exclude, "exclude", "", "blacklist: hide these servers (comma-separated IDs/globs, deny wins); OXYP_EXCLUDE also works")
 	return c
 }
 
 func searchCmd() *cobra.Command {
-	var server, group string
+	var server, group, servers, exclude string
 	var regex bool
 	var limit, offset int
 	c := &cobra.Command{
@@ -601,8 +607,8 @@ func searchCmd() *cobra.Command {
 			if server != "" {
 				q.Set("server", server)
 			}
-			if g := cliGroup(group); g != "" {
-				q.Set("group", g)
+			for k, v := range scopeValues(group, servers, exclude) {
+				q[k] = v
 			}
 			if regex {
 				q.Set("regex", "1")
@@ -626,6 +632,8 @@ func searchCmd() *cobra.Command {
 	}
 	c.Flags().StringVar(&server, "server", "", "restrict to one server")
 	c.Flags().StringVar(&group, "group", "", "curated subset ([groups.*]); OXYP_GROUP also works")
+	c.Flags().StringVar(&servers, "servers", "", "whitelist: only these servers (comma-separated IDs/globs); OXYP_SERVERS also works")
+	c.Flags().StringVar(&exclude, "exclude", "", "blacklist: hide these servers (comma-separated IDs/globs, deny wins); OXYP_EXCLUDE also works")
 	c.Flags().BoolVar(&regex, "regex", false, "query is a regex (unranked)")
 	c.Flags().IntVar(&limit, "limit", 12, "page size")
 	c.Flags().IntVar(&offset, "offset", 0, "page offset")
@@ -640,17 +648,61 @@ func cliGroup(flag string) string {
 	return os.Getenv("OXYP_GROUP")
 }
 
+// cliServers resolves --servers flag over OXYP_SERVERS env (whitelist,
+// comma-separated exact-or-glob IDs, empty = all).
+func cliServers(flag string) string {
+	if flag != "" {
+		return flag
+	}
+	return os.Getenv("OXYP_SERVERS")
+}
+
+// cliExclude resolves --exclude flag over OXYP_EXCLUDE env (blacklist,
+// comma-separated exact-or-glob IDs, deny wins).
+func cliExclude(flag string) string {
+	if flag != "" {
+		return flag
+	}
+	return os.Getenv("OXYP_EXCLUDE")
+}
+
+// scopeValues builds ?group=&servers=&exclude= from resolved flag/env
+// values (empty dimensions omitted).
+func scopeValues(group, servers, exclude string) url.Values {
+	vals := url.Values{}
+	if g := cliGroup(group); g != "" {
+		vals.Set("group", g)
+	}
+	if s := cliServers(servers); s != "" {
+		vals.Set("servers", s)
+	}
+	if x := cliExclude(exclude); x != "" {
+		vals.Set("exclude", x)
+	}
+	return vals
+}
+
+// withScopeQuery appends scope params to a base path (no query yet or with).
+func withScopeQuery(path string, vals url.Values) string {
+	if len(vals) == 0 {
+		return path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + vals.Encode()
+}
+
 func describeCmd() *cobra.Command {
-	var group string
+	var group, servers, exclude string
 	c := &cobra.Command{
 		Use:   "describe <server> <tool>",
 		Short: "full tool schema",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			path := "/servers/" + url.PathEscape(args[0]) + "/tools/" + url.PathEscape(args[1])
-			if g := cliGroup(group); g != "" {
-				path += "?group=" + url.QueryEscape(g)
-			}
+			path = withScopeQuery(path, scopeValues(group, servers, exclude))
 			b, code, err := apiCall("GET", path, nil)
 			if err != nil {
 				return err
@@ -663,6 +715,8 @@ func describeCmd() *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&group, "group", "", "curated subset ([groups.*]); OXYP_GROUP also works")
+	c.Flags().StringVar(&servers, "servers", "", "whitelist: only these servers (comma-separated IDs/globs); OXYP_SERVERS also works")
+	c.Flags().StringVar(&exclude, "exclude", "", "blacklist: hide these servers (comma-separated IDs/globs, deny wins); OXYP_EXCLUDE also works")
 	return c
 }
 
@@ -811,6 +865,8 @@ func shimCmd() *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&shimGroup, "group", "", "curated server subset ([groups.*]); OXYP_GROUP also works")
+	c.Flags().StringVar(&shimServers, "servers", "", "whitelist: only these servers (comma-separated IDs/globs); OXYP_SERVERS also works")
+	c.Flags().StringVar(&shimExclude, "exclude", "", "blacklist: hide these servers (comma-separated IDs/globs, deny wins); OXYP_EXCLUDE also works")
 	return c
 }
 

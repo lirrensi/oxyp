@@ -38,7 +38,12 @@ type rpcErr struct {
 
 // shimGroup scopes the shim to a curated subset ([groups.*]).
 // --group wins; OXYP_GROUP is the default (one group per client).
+// shimServers/shimExclude add the ad-hoc whitelist/blacklist layer:
+// --servers wins over OXYP_SERVERS, --exclude over OXYP_EXCLUDE.
+// Allow empty = all; exclude wins over allow (same glob engine as tools).
 var shimGroup string
+var shimServers string
+var shimExclude string
 
 func shimGroupName() string {
 	if shimGroup != "" {
@@ -47,17 +52,45 @@ func shimGroupName() string {
 	return os.Getenv("OXYP_GROUP")
 }
 
-// withGroup appends ?group= (or &group=) when scoping is configured.
-func withGroup(path string) string {
-	g := shimGroupName()
-	if g == "" {
+func shimServersName() string {
+	if shimServers != "" {
+		return shimServers
+	}
+	return os.Getenv("OXYP_SERVERS")
+}
+
+func shimExcludeName() string {
+	if shimExclude != "" {
+		return shimExclude
+	}
+	return os.Getenv("OXYP_EXCLUDE")
+}
+
+// withScope appends ?group=&servers=&exclude= when scoping is configured.
+// withGroup is the legacy alias (group only callers keep working).
+func withScope(path string) string {
+	vals := url.Values{}
+	if g := shimGroupName(); g != "" {
+		vals.Set("group", g)
+	}
+	if s := shimServersName(); s != "" {
+		vals.Set("servers", s)
+	}
+	if x := shimExcludeName(); x != "" {
+		vals.Set("exclude", x)
+	}
+	if len(vals) == 0 {
 		return path
 	}
 	sep := "?"
 	if strings.Contains(path, "?") {
 		sep = "&"
 	}
-	return path + sep + "group=" + url.QueryEscape(g)
+	return path + sep + vals.Encode()
+}
+
+func withGroup(path string) string {
+	return withScope(path)
 }
 
 var metaTools = []map[string]any{

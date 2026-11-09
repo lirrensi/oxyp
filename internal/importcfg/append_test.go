@@ -78,8 +78,15 @@ func TestAppendBlocksSeparators(t *testing.T) {
 			t.Fatal(err)
 		}
 		b, _ := os.ReadFile(ConfigPath(dir))
-		if string(b) != "\n" {
-			t.Fatalf("empty append = %q", string(b))
+		// New files start with the self-documenting header, then the (empty) body.
+		if !strings.HasPrefix(string(b), "# oxyp.toml") {
+			t.Fatalf("new file must start with header, got %q", string(b)[:30])
+		}
+		if !strings.HasSuffix(string(b), "\n") {
+			t.Fatalf("must end with newline: %q", string(b))
+		}
+		if !strings.Contains(string(b), "--description") {
+			t.Fatalf("header must teach --description: %q", string(b)[:200])
 		}
 	})
 	t.Run("nestedDirs", func(t *testing.T) {

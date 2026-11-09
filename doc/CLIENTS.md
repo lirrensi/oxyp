@@ -1,4 +1,7 @@
-# Client MCP patterns — opencode / omp / hermes
+# Client MCP patterns — opencode / omp / hermes ✨
+
+> One daemon, every client. This is how you point each harness at oxyp —
+> including per-folder views so one project sees 5 servers and another sees 10.
 
 Surveyed 2026-10-28. Full reports: `agent://ComfortableHamster` (opencode+omp),
 `agent://AlternativeOctopus` (hermes). This is the distilled compat surface
@@ -18,10 +21,28 @@ oxyp gives every client the same two doors:
   without a login shell).
 - Streamable HTTP: `url: http://127.0.0.1:8379/mcp` — the same 5 meta-tools
   over MCP (URL-only clients, ChatGPT-style connectors, `curl`). Same
-  deny/param/group gates, same cold semantics; bearer + `Origin` checks apply.
+  deny/param/group/servers/exclude gates, same cold semantics; bearer + `Origin` checks apply.
   Remote over LAN needs `daemon.token` (or `ssh -L` forward).
 - oxyp's own REST (`/servers`, `/tools`, …) stays for the CLI/shim; MCP
   clients use the shim or `/mcp`, never the REST paths directly.
+
+### Per-client / per-folder views (the superpower)
+
+> 10 servers connected, but this folder only wants 5? Or all-except-2?
+
+| Want | opencode `mcp.<name>` | omp / hermes |
+|---|---|---|
+| Only these | `"command": ["oxyp","shim","--servers","github,linear"]` | `args: [shim, --servers, "github,linear"]` |
+| All except these | `"command": ["oxyp","shim","--exclude","gamma,*-prod"]` | `args: [shim, --exclude, gamma]` + `env: {OXYP_EXCLUDE: gamma}` |
+| Curated group | `"command": ["oxyp","shim","--group","coding"]` | `args: [shim, --group, coding]` |
+| Remote + scoped | `"command": ["oxyp","shim"]`, `"environment": {"OXYP_URL": "...", "OXYP_TOKEN": "...", "OXYP_SERVERS": "github"}` | `env: {OXYP_URL, OXYP_TOKEN, OXYP_SERVERS}` |
+
+Rules: `--servers` = whitelist (exact IDs or `*`/`?` globs, comma-separated),
+`--exclude` = blacklist (deny wins), `--group` = `[groups.*]` subset — all three
+AND. Flags win over `OXYP_GROUP` / `OXYP_SERVERS` / `OXYP_EXCLUDE` env. Shim views
+are fixed per client (the agent can't widen its own sandbox). URL-only clients
+use `POST /mcp?servers=&exclude=` or `servers`/`exclude` tool args instead.
+`call` outside scope 403s `server not in scope`.
 
 ## Transports in the wild (what downstream servers speak)
 
