@@ -82,7 +82,7 @@ func (d *Daemon) superviseFailure(m *managed, err error) {
 	if errors.As(err, &authErr) {
 		m.setHealth(&Health{LastChecked: time.Now(),
 			AuthRequired: "run: oxyp login " + authErr.Server,
-			State:      stateAuthNeeded})
+			State:        stateAuthNeeded})
 		return
 	}
 	m.mu.Lock()

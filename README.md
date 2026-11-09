@@ -1,6 +1,10 @@
 # oxyp
 
 <p align="center">
+  <img src="assets/oxyp-logo.jpg" alt="oxyp — one daemon, every connector" width="720" />
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/version-0.3.0-blueviolet?style=flat-square" alt="Version 0.3.0" />
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License" />
   <img src="https://img.shields.io/github/go-mod/go-version/lirrensi/oxyp?style=flat-square" alt="Go version" />
