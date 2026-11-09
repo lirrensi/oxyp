@@ -65,6 +65,13 @@ type Health struct {
 	// AuthRequired holds the authorize URL when the server is reachable
 	// but needs OAuth (lazy-mcp auth_required — NOT an error).
 	AuthRequired string
+	// State is the supervisor state (degraded/down/auth-needed/
+	// config-broken). Empty for healthy/cold (cold = nil record).
+	State ServerState
+	// Retries counts consecutive failures in degraded/down.
+	Retries int
+	// RetryIn is the human backoff until the next heal probe ("8s","1m0s").
+	RetryIn string
 }
 
 // AuthNeededError signals interactive OAuth is required. Callers surface
@@ -105,12 +112,15 @@ type managed struct {
 	// spawnErr carries the last spawner's terminal error to woken
 	// waiters (under m.mu). Consumed on take; cleared on next spawn.
 	spawnErr error
+	// failCount/retryAt drive the supervisor backoff (under m.mu):
+	// consecutive failures and when the next heal probe may run.
+	failCount int
+	retryAt   time.Time
 	// inFlight counts active tool calls; the idle sweeper never stops
 	// a server with work running.
 	inFlight int
 	// lastUsed is the last completed activity (spawn counts).
 	lastUsed time.Time
-
 	healthMu sync.RWMutex
 	health   *Health
 
@@ -243,7 +253,7 @@ func NewWithDirs(cfg *config.Config, log *slog.Logger, oauthDir, cachePath strin
 		s.Name = name // map key wins; test-built entries may omit Name
 		m := &managed{cfg: s}
 		if s.ConfigError != "" {
-			m.health = &Health{LastChecked: time.Now(), Error: "config: " + s.ConfigError}
+			m.health = &Health{LastChecked: time.Now(), Error: "config: " + s.ConfigError, State: stateConfigError}
 		}
 		d.servers[name] = m
 		fps[name] = metacache.Fingerprint(s)
@@ -766,7 +776,7 @@ func (d *Daemon) spawn(ctx context.Context, m *managed, gen int) (client.MCPClie
 		if cfg.IsRemote() && (cfg.Auth == "oauth" || hasResourceMetadata(err)) &&
 			(errors.Is(err, transport.ErrOAuthAuthorizationRequired) ||
 				errors.Is(err, transport.ErrAuthorizationRequired)) {
-			m.setHealth(&Health{LastChecked: time.Now(), AuthRequired: "run: oxyp login " + cfg.Name})
+			m.setHealth(&Health{LastChecked: time.Now(), AuthRequired: "run: oxyp login " + cfg.Name, State: stateAuthNeeded})
 			return nil, &AuthNeededError{Server: cfg.Name}
 		}
 		if cfg.IsRemote() {
@@ -800,7 +810,7 @@ func (d *Daemon) spawn(ctx context.Context, m *managed, gen int) (client.MCPClie
 			d.InvalidateResources(srvName)
 		}
 	})
-	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	m.supervise()
 	return c, nil
 }
 
@@ -1152,7 +1162,7 @@ func (d *Daemon) ListTools(ctx context.Context, name string) ([]mcp.Tool, error)
 				}
 			}
 			d.storeToolsGen(name, m, cfg, tools, genOf(m))
-			m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+			m.supervise()
 			return tools, nil
 		}
 		d.log.Info("remote revalidation failed, serving stale tools", "server", name)
@@ -1197,7 +1207,7 @@ func (d *Daemon) ListTools(ctx context.Context, name string) ([]mcp.Tool, error)
 		tools = intersectTools(diskTools, tools)
 	}
 	d.storeToolsGen(name, m, cfg, tools, gen)
-	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	m.supervise()
 	return tools, nil
 }
 
@@ -1304,7 +1314,7 @@ func (d *Daemon) RefreshTools(ctx context.Context, name string) (tools []mcp.Too
 	}
 	added, removed = diffToolNames(old, live)
 	d.storeToolsGenForce(name, m, cfg, live, gen, true)
-	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	m.supervise()
 	return live, added, removed, nil
 }
 
@@ -1421,7 +1431,7 @@ func (d *Daemon) mapAuthErr(m *managed, cfg config.ServerEntry, err error) error
 		!errors.Is(err, transport.ErrAuthorizationRequired) {
 		return nil
 	}
-	m.setHealth(&Health{LastChecked: time.Now(), AuthRequired: "run: oxyp login " + cfg.Name})
+	m.setHealth(&Health{LastChecked: time.Now(), AuthRequired: "run: oxyp login " + cfg.Name, State: stateAuthNeeded})
 	d.resetClient(m)
 	return &AuthNeededError{Server: cfg.Name}
 }
@@ -1546,7 +1556,7 @@ func (d *Daemon) ListResources(ctx context.Context, name string) ([]mcp.Resource
 	m.resMu.Lock()
 	m.res = res
 	m.resMu.Unlock()
-	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	m.supervise()
 	return res, nil
 }
 
@@ -1600,7 +1610,7 @@ func (d *Daemon) ReadResource(ctx context.Context, name, uri string) (*mcp.ReadR
 		d.recordFailure(m, err)
 		return nil, err
 	}
-	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	m.supervise()
 	return res, nil
 }
 
@@ -1655,7 +1665,7 @@ func (d *Daemon) ListPrompts(ctx context.Context, name string) ([]mcp.Prompt, er
 	m.resMu.Lock()
 	m.prompts = prompts
 	m.resMu.Unlock()
-	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	m.supervise()
 	return prompts, nil
 }
 
@@ -1712,7 +1722,7 @@ func (d *Daemon) ListResourceTemplates(ctx context.Context, name string) ([]mcp.
 	m.resMu.Lock()
 	m.templates = tmpl
 	m.resMu.Unlock()
-	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	m.supervise()
 	return tmpl, nil
 }
 
@@ -1759,7 +1769,7 @@ func (d *Daemon) GetPrompt(ctx context.Context, name, prompt string, args map[st
 		d.recordFailure(m, err)
 		return nil, err
 	}
-	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	m.supervise()
 	return res, nil
 }
 
@@ -1804,7 +1814,7 @@ func (d *Daemon) Complete(ctx context.Context, name string, params mcp.CompleteP
 		d.recordFailure(m, err)
 		return nil, err
 	}
-	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	m.supervise()
 	return res, nil
 }
 
@@ -1996,7 +2006,7 @@ func (d *Daemon) CallToolWithMeta(ctx context.Context, name, tool string, args m
 		d.recordFailure(m, err)
 		return nil, err
 	}
-	m.setHealth(&Health{Healthy: true, LastChecked: time.Now()})
+	m.supervise()
 	return res, nil
 }
 
@@ -2082,15 +2092,11 @@ func (d *Daemon) callToolOnce(ctx context.Context, m *managed, tool string, args
 	return res, err
 }
 
-// recordFailure stores health: auth-needed keeps auth_required (NOT error).
-// Error strings are redacted before storage (no secret leak to /health).
+// recordFailure stores health via the supervisor: auth-needed parks (never
+// retried), transient errors enter degraded/down backoff. Error strings
+// are redacted before storage (no secret leak to /health).
 func (d *Daemon) recordFailure(m *managed, err error) {
-	var authErr *AuthNeededError
-	if errors.As(err, &authErr) {
-		m.setHealth(&Health{LastChecked: time.Now(), AuthRequired: "run: oxyp login " + authErr.Server})
-		return
-	}
-	m.setHealth(&Health{LastChecked: time.Now(), Error: redact.Body(err.Error())})
+	d.superviseFailure(m, err)
 }
 
 // Stolen shape from mcpd healthCheckLoop, minus eager connect.
@@ -2144,10 +2150,22 @@ func (d *Daemon) pingConnected(ctx context.Context) {
 			defer cancel()
 			start := time.Now()
 			if err := c.Ping(pctx); err != nil {
-				m.setHealth(&Health{LastChecked: time.Now(), Error: err.Error()})
+				// Session expired: reset + re-spawn inline once (same
+				// 404 policy as the op paths). Other failures arm the
+				// supervisor; the heal loop retries on backoff.
+				if m.getCfg().IsRemote() && errors.Is(err, transport.ErrSessionTerminated) {
+					d.resetClient(m)
+					if _, serr := d.clientFor(ctx, m); serr == nil {
+						m.supervise()
+						return
+					} else {
+						err = serr
+					}
+				}
+				d.superviseFailure(m, err)
 				return
 			}
-			m.setHealth(&Health{Healthy: true, LastChecked: time.Now(), Latency: time.Since(start)})
+			m.superviseLatency(time.Since(start))
 		}(n)
 	}
 	// One /health per peer, fanned out to its connected virtuals:
@@ -2308,6 +2326,8 @@ func (d *Daemon) Reload(cfg *config.Config) (added, removed, modified []string) 
 		if changed {
 			m.cfg = ns
 			m.gen++
+			m.failCount = 0
+			m.retryAt = time.Time{}
 		}
 		m.mu.Unlock()
 		if changed {
@@ -2322,7 +2342,7 @@ func (d *Daemon) Reload(cfg *config.Config) (added, removed, modified []string) 
 			m.instructions = ""
 			m.resMu.Unlock()
 			if ns.ConfigError != "" {
-				m.setHealth(&Health{LastChecked: time.Now(), Error: "config: " + ns.ConfigError})
+				m.setHealth(&Health{LastChecked: time.Now(), Error: "config: " + ns.ConfigError, State: stateConfigError})
 			} else {
 				m.setHealth(nil)
 			}
@@ -2333,7 +2353,7 @@ func (d *Daemon) Reload(cfg *config.Config) (added, removed, modified []string) 
 	for name, ns := range want {
 		m := &managed{cfg: ns}
 		if ns.ConfigError != "" {
-			m.health = &Health{LastChecked: time.Now(), Error: "config: " + ns.ConfigError}
+			m.health = &Health{LastChecked: time.Now(), Error: "config: " + ns.ConfigError, State: stateConfigError}
 		}
 		d.servers[name] = m
 		added = append(added, name)

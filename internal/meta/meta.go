@@ -216,6 +216,7 @@ type serverInfo struct {
 	Healthy      *bool    `json:"healthy,omitempty"`
 	Error        string   `json:"error,omitempty"`
 	AuthRequired string   `json:"auth_required,omitempty"`
+	State        string   `json:"state,omitempty"`
 	Connected    bool     `json:"connected"`
 	Origin       string   `json:"origin,omitempty"`
 	Shadowed     []string `json:"shadowed,omitempty"`
@@ -269,12 +270,15 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 			f := false
 			info.Healthy = &f
 			info.Error = "config: " + e.ConfigError
+			info.State = "config-broken"
 		} else if h := s.d.HealthOf(name); h != nil {
 			info.Healthy = &h.Healthy
 			info.Error = h.Error
 			info.AuthRequired = h.AuthRequired
+			info.State = string(h.State)
+		} else {
+			info.State = "cold"
 		}
-		// Surface cached init-time instructions without spawning cold
 		// servers: only already-connected servers have them. Never blocks.
 		if s.d.IsConnected(name) {
 			info.Connected = true
@@ -677,6 +681,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		if e.ConfigError != "" {
 			entry["healthy"] = false
 			entry["error"] = "config: " + e.ConfigError
+			entry["state"] = "config-broken"
 		} else if h != nil {
 			entry["healthy"] = h.Healthy
 			if h.Error != "" {
@@ -685,6 +690,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			if h.AuthRequired != "" {
 				entry["auth_required"] = h.AuthRequired
 			}
+			if h.State != "" {
+				entry["state"] = string(h.State)
+				if h.Retries > 0 {
+					entry["retries"] = h.Retries
+				}
+				if h.RetryIn != "" {
+					entry["retry_in"] = h.RetryIn
+				}
+			}
+		} else {
+			entry["state"] = "cold"
 		}
 		servers[name] = entry
 	}

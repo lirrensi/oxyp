@@ -691,7 +691,7 @@ func (d *Daemon) expandBulk(name string, pcfg config.PeerEntry, cat *peerfederat
 		}
 		want[q] = e
 		// Owner health rides through, attributed; auth hints name the owner.
-		if hrec := ownerHealth(name, s.AuthRequired, s.Error, s.Healthy); hrec != nil {
+		if hrec := ownerHealth(name, s.AuthRequired, s.Error, s.Healthy, s.State); hrec != nil {
 			health[q] = hrec
 		}
 		if len(s.Tools) != 0 {
@@ -790,7 +790,7 @@ func (d *Daemon) expandThin(name string, pcfg config.PeerEntry, svs []peerfedera
 			e.Params = pm
 		}
 		want[q] = e
-		if hrec := ownerHealth(name, s.AuthRequired, s.Error, s.Healthy); hrec != nil {
+		if hrec := ownerHealth(name, s.AuthRequired, s.Error, s.Healthy, s.State); hrec != nil {
 			health[q] = hrec
 		}
 		// Stash instructions for post-merge seeding (virtuals don't exist
@@ -826,14 +826,14 @@ func (d *Daemon) seedThinInstr(peer string, want map[string]config.ServerEntry, 
 
 // ownerHealth builds the attributed owner-state record for one catalog row.
 // Nil = owner reports healthy (clears stuck owner-state on merge).
-func ownerHealth(peer, authRequired, errMsg string, healthy *bool) *Health {
+func ownerHealth(peer, authRequired, errMsg string, healthy *bool, state string) *Health {
 	switch {
 	case authRequired != "":
-		return &Health{LastChecked: time.Now(), AuthRequired: authRequired + " (on " + peer + ")"}
+		return &Health{LastChecked: time.Now(), AuthRequired: authRequired + " (on " + peer + ")", State: ServerState(state)}
 	case errMsg != "":
-		return &Health{LastChecked: time.Now(), Error: "peer " + peer + ": " + errMsg}
+		return &Health{LastChecked: time.Now(), Error: "peer " + peer + ": " + errMsg, State: ServerState(state)}
 	case healthy != nil && !*healthy:
-		return &Health{LastChecked: time.Now(), Error: "peer " + peer + " reports unhealthy"}
+		return &Health{LastChecked: time.Now(), Error: "peer " + peer + " reports unhealthy", State: ServerState(state)}
 	}
 	return nil
 }
@@ -968,7 +968,7 @@ func (d *Daemon) mergeVirtuals(peer string, want map[string]config.ServerEntry, 
 		// Fresh virtual: owner-state only (no liveness signal yet).
 		// Healthy-absent (nil) stays nil = "never checked", like cold locals.
 		if h, ok := health[q]; ok && h != nil {
-			m.health = &Health{LastChecked: h.LastChecked, Error: h.Error, AuthRequired: h.AuthRequired}
+			m.health = &Health{LastChecked: h.LastChecked, Error: h.Error, AuthRequired: h.AuthRequired, State: h.State}
 		}
 		d.servers[q] = m
 	}
@@ -1006,13 +1006,14 @@ func (m *managed) mergeOwnerHealth(h *Health) {
 		if cur == nil {
 			return
 		}
-		// Owner healthy: clear owner Error/AuthRequired, keep liveness.
+		// Owner healthy: clear owner Error/AuthRequired/State, keep liveness.
 		m.setHealth(nh)
 		return
 	}
 	nh.Healthy = false
 	nh.Error = h.Error
 	nh.AuthRequired = h.AuthRequired
+	nh.State = h.State
 	m.setHealth(nh)
 }
 

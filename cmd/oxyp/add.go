@@ -147,6 +147,12 @@ func addCmd() *cobra.Command {
 			if needsAuth {
 				fmt.Fprintf(os.Stderr, "next: oxyp login %s\n", name)
 			}
+			// Best-effort live pickup (peers add/remove pattern): reload
+			// a running daemon so the server is listable without a
+			// manual reload. Daemon down → it mounts at next start.
+			if _, _, rerr := apiCall("POST", "/reload", nil); rerr == nil {
+				fmt.Fprintln(os.Stderr, "reloaded: server lists now")
+			}
 			return nil
 		},
 	}

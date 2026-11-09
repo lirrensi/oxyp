@@ -59,6 +59,7 @@ type serverFull struct {
 	Healthy      *bool                  `json:"healthy,omitempty"`
 	Error        string                 `json:"error,omitempty"`
 	AuthRequired string                 `json:"auth_required,omitempty"`
+	State        string                 `json:"state,omitempty"`
 	Connected    bool                   `json:"connected"`
 	Tools        []toolFull             `json:"tools"`
 	Transitive   bool                   `json:"transitive,omitempty"`
@@ -99,6 +100,9 @@ func (s *Server) catalogRows(r *http.Request, peerView, full bool) ([]serverFull
 			sf.Healthy = &h.Healthy
 			sf.Error = h.Error
 			sf.AuthRequired = h.AuthRequired
+			sf.State = string(h.State)
+		} else {
+			sf.State = "cold"
 		}
 		if s.d.IsConnected(name) {
 			sf.Connected = true
@@ -126,6 +130,7 @@ func (s *Server) catalogRows(r *http.Request, peerView, full bool) ([]serverFull
 					sf.Healthy = &h.Healthy
 					sf.Error = h.Error
 					sf.AuthRequired = h.AuthRequired
+					sf.State = string(h.State)
 				}
 				out = append(out, sf)
 				continue

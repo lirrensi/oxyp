@@ -39,6 +39,7 @@ type Server struct {
 	Error        string `json:"error"`
 	AuthRequired string `json:"auth_required"`
 	Connected    bool   `json:"connected"`
+	State        string `json:"state"`
 	Transitive   bool   `json:"transitive"`
 }
 
@@ -89,6 +90,7 @@ type serverHealth struct {
 	Healthy      *bool  `json:"healthy"`
 	Error        string `json:"error"`
 	AuthRequired string `json:"auth_required"`
+	State        string `json:"state"`
 }
 
 // PeerError is a failed peer REST call with status + decoded body.
@@ -320,6 +322,7 @@ type CatalogServer struct {
 	Healthy      *bool                  `json:"healthy"`
 	Error        string                 `json:"error"`
 	AuthRequired string                 `json:"auth_required"`
+	State        string                 `json:"state"`
 	Connected    bool                   `json:"connected"`
 	Tools        []CatalogTool          `json:"tools"`
 	Transitive   bool                   `json:"transitive"`

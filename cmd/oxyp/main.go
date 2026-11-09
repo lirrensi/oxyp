@@ -247,8 +247,8 @@ func daemonCmd() *cobra.Command {
 			go d.SyncPeers(ctx)
 			go d.EagerStart(ctx)
 			go d.PingLoop(ctx)
+			go d.HealLoop(ctx)
 			go d.SweepLoop(ctx)
-			// SIGHUP → reload (lazy-mcp/mcpd pattern)
 			hup := make(chan os.Signal, 1)
 			signal.Notify(hup, syscall.SIGHUP)
 			go func() {
