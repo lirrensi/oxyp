@@ -314,7 +314,7 @@ auth = "oauth"
 new_tools = "hide"       # upstream additions stay hidden until reviewed
 pinned = true            # freeze discovery to the cache snapshot
 # `oxyp refresh github-personal` re-trusts upstream when you're ready (freezing never self-heals)
-tool_timeout = 60        # per-RPC seconds (default 10)
+tool_timeout = 600       # data-plane seconds (default 600; 0 = no OxyP deadline)
 token_header = "X-API-Key"  # static Authorization goes out under this name
 
 [servers.github-personal.tools]

@@ -140,6 +140,7 @@ func TestValidateDaemonViaLoad(t *testing.T) {
 		{"negGuard", "[daemon]\n[daemon.output_guard]\nmax_bytes = -1\n[servers.s]\ncommand = [\"x\"]\n", "daemon.output_guard limits must be >= 0"},
 		{"negTrace", "[daemon]\n[daemon.trace]\nmax_bytes = -5\n[servers.s]\ncommand = [\"x\"]\n", "daemon.trace limits must be >= 0"},
 		{"negIdle", "[daemon]\nidle_timeout = -1\n[servers.s]\ncommand = [\"x\"]\n", "daemon.idle_timeout must be >= 0"},
+		{"negDaemonToolTimeout", "[daemon]\ntool_timeout = -1\n[servers.s]\ncommand = [\"x\"]\n", "daemon.tool_timeout must be >= 0"},
 		{"nonLoopbackNoToken", "[daemon]\naddr = \"0.0.0.0:1\"\n[servers.s]\ncommand = [\"x\"]\n", "daemon.token is required for non-loopback addr"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

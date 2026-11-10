@@ -40,12 +40,16 @@ import (
 
 var (
 	dirFlag string
-	timeout = 60 * time.Second
+	// timeout is a CLIENT-side cap for CLI/shim HTTP calls. 0 = none:
+	// OxyP never imposes a deadline the caller did not ask for. The
+	// daemon's configured tool_timeout still governs upstream work.
+	timeout time.Duration
 )
 
 func main() {
 	root := &cobra.Command{Use: "oxyp", Short: "one daemon, every connector"}
 	root.PersistentFlags().StringVar(&dirFlag, "dir", "", "config dir (default OXYP_DIR, XDG_CONFIG_HOME/oxyp, or ~/.oxyp)")
+	root.PersistentFlags().DurationVar(&timeout, "timeout", 0, "client deadline for daemon HTTP calls (0 = none)")
 	root.AddCommand(daemonCmd(), callCmd(), serversCmd(), toolsCmd(), searchCmd(), describeCmd(), statusCmd(), reloadCmd(), refreshCmd(), stopCmd(), restartCmd(), shimCmd(), loginCmd(), doctorCmd(), addCmd(), importCmd(), peersCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -217,9 +221,13 @@ func daemonCmd() *cobra.Command {
 				Addr:              cfg.Daemon.Addr,
 				Handler:           ms.Handler(),
 				ReadHeaderTimeout: 10 * time.Second,
-				ReadTimeout:       30 * time.Second,
-				WriteTimeout:      60 * time.Second,
-				IdleTimeout:       120 * time.Second,
+				// No read/write deadline: upstream tools may legitimately
+				// run for minutes. The caller's ctx (and the configured
+				// data-plane timeout) govern; a slowloris only gets as far
+				// as the 10s header deadline.
+				ReadTimeout:  0,
+				WriteTimeout: 0,
+				IdleTimeout:  120 * time.Second,
 			}
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()

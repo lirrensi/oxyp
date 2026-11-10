@@ -191,8 +191,8 @@ serverInfo: {name: oxyp, version}, capabilities: {tools: {}}}`,
 `tools/list` → 5 static tools (no pagination), `tools/call`, `ping` → `{}`,
 unknown → `-32000`, over pure-JSONL stdout (1 MiB–64 MiB lines, blanks
 skipped, undecodable lines silently ignored, every response one JSON
-object + `\n`), autostarting/reusing the daemon over HTTP (60 s client,
-bearer when set; `OXYP_URL`/`OXYP_TOKEN` dial a remote daemon instead —
+object + `\n`), autostarting/reusing the daemon over HTTP (no client deadline
+by default; `--timeout` to cap, bearer when set; `OXYP_URL`/`OXYP_TOKEN` dial a remote daemon instead —
 see the CLI spec). All errors use code `-32000`.
 
 **As a** MCP client (hermes/omp/opencode)
@@ -314,5 +314,5 @@ Verification: `V-HTTP-005` (zoo media battery).
 | Invoke body cap | 64 MiB | bound malicious clients |
 | Shim line cap | 64 MiB | bound giant results |
 | Probe timeout | 15 s | hint without hang |
-| Daemon HTTP client (shim/CLI) | 60 s | patient calls |
+| Daemon HTTP client (shim/CLI) | 0 (none; `--timeout` to cap) | client owns its deadline |
 | Redirects followed | 4 (5 requests) | loop bound |

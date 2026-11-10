@@ -17,9 +17,29 @@ func TestTimeoutEdges(t *testing.T) {
 	py := "python3"
 	zoo := filepath.Join(zooPath(t), "stdio", "zoo_stdio.py")
 
+	t.Run("slow-tool-11s-passes-default-600s", func(t *testing.T) {
+		cfg := &config.Config{Servers: map[string]config.ServerEntry{
+			"slow": {Command: []string{py, zoo, "--slow-tool", "11"}},
+		}}
+		d := daemon.New(cfg, testLog())
+		defer d.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := d.ListTools(ctx, "slow"); err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		start := time.Now()
+		if _, err := d.CallTool(ctx, "slow", "ping_tool", nil); err != nil {
+			t.Fatalf("11s tool must pass the 600s data-plane default: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed < 11*time.Second {
+			t.Fatalf("tool returned too early: %v", elapsed)
+		}
+	})
+
 	t.Run("slow-tool-15s-exceeds-10s-request-timeout", func(t *testing.T) {
 		cfg := &config.Config{Servers: map[string]config.ServerEntry{
-			"slow": {Command: []string{py, zoo, "--slow-tool", "15"}},
+			"slow": {Command: []string{py, zoo, "--slow-tool", "15"}, ToolTimeout: new(10)},
 		}}
 		d := daemon.New(cfg, testLog())
 		defer d.Close()
@@ -42,7 +62,7 @@ func TestTimeoutEdges(t *testing.T) {
 
 	t.Run("hang-tool", func(t *testing.T) {
 		cfg := &config.Config{Servers: map[string]config.ServerEntry{
-			"hang": {Command: []string{py, zoo, "--hang-tool"}},
+			"hang": {Command: []string{py, zoo, "--hang-tool"}, ToolTimeout: new(10)},
 		}}
 		d := daemon.New(cfg, testLog())
 		defer d.Close()

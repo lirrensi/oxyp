@@ -457,7 +457,7 @@ func DefaultHeader() string {
 #   # auth = "oauth"                    # daemon-held OAuth (browser/device/token/client_credentials)
 #   # enabled = false                   # park it: hidden, cache dropped
 #   # lifecycle = "lazy"                # lazy/eager/keep-alive/lazy-keep-alive
-#   # tool_timeout = 60                 # per-RPC seconds, default 10
+#   # tool_timeout = 600                # data-plane seconds (tools/read/prompt); default 600, 0 = no OxyP deadline
 #   # [servers.x.tools] allow/deny globs (deny wins, invisible+blocked)
 #   # [servers.x.params] tool = ["allowed", "args"] (extra args 403)
 #
@@ -476,6 +476,7 @@ func DefaultHeader() string {
 #   [daemon]
 #   # addr = "127.0.0.1:8379"         # non-loopback needs token
 #   # token = "{file:~/.oxyp/bearer}" # required for 0.0.0.0, file or ${VAR}
+#   # tool_timeout = 600              # global data-plane default; 0 = no OxyP deadline
 #
 # Secrets anywhere: ${VAR} / {file:/path}, expanded at load, redacted in logs.
 # Full schema: README Configure + doc/spec-guard.md + doc/spec-federation.md.

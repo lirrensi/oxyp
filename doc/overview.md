@@ -61,7 +61,7 @@ MCP clients (hermes / omp / opencode) — URL-only clients via POST /mcp
   │  stdio JSON-RPC (shim) or Streamable HTTP (/mcp): initialize / tools/list / tools/call / ping
   ▼
 oxyp shim (cmd/oxyp/shim.go) — 5 static meta-tools, stdout pure JSONL
-  │  HTTP + bearer (60 s client), autostarts daemon if needed; --group/--servers/--exclude scopes
+  │  HTTP + bearer (client deadline 0 = none; --timeout to cap), autostarts daemon if needed; --group/--servers/--exclude scopes
   │  (flags over OXYP_GROUP/OXYP_SERVERS/OXYP_EXCLUDE; one view per client, agent can't escape)
   ▼
 daemon HTTP API (internal/meta) — 11 routes + auth gate
@@ -71,7 +71,7 @@ daemon HTTP API (internal/meta) — 11 routes + auth gate
   │  (tool args group/servers/exclude over ?query over env; InScope ANDs with sharing)
   ▼
 Daemon (internal/daemon) — lifecycle, spawn, health, cache, OAuth, probe, groups+scope
-  ├── local stdio children (mcp-go, 30 s init / 10 s RPC / 3 s ping; per-server tool_timeout)
+  ├── local stdio children (mcp-go, 30 s init / 10 s control RPC / 3 s ping; data-plane default 600 s)
   ├── remote Streamable HTTP + legacy SSE fallback (remhttp client; token_header remap)
   ├── metacache (<dir>/cache.json) — tool metadata, fingerprint-keyed; pinned / new_tools=hide
   ├── OAuth store (<dir>/oauth/) — daemon-held tokens + DCR sidecar; authorization_url override
@@ -105,9 +105,10 @@ Dir precedence: --dir > OXYP_DIR > XDG_CONFIG_HOME/oxyp > ~/.oxyp
 
 - Default bind `127.0.0.1:8379`; empty token means loopback trust ONLY —
   a non-loopback addr with an empty token fails `config.Load`.
-- Timeouts: initialize 30 s, per-RPC 10 s (per-server `tool_timeout` overrides),
+- Timeouts: initialize 30 s, control-plane RPC 10 s, data-plane 600 s default
+  (`[daemon] tool_timeout` / per-server `tool_timeout`; 0 = no OxyP deadline),
   health ping 3 s every 10 s, idle sweep every 30 s with 10 min default,
-  remote metadata TTL 5 min, CLI API 60 s, autostart wait 5 s, doctor/add live
+  remote metadata TTL 5 min, CLI API no deadline (`--timeout` to cap), autostart wait 5 s, doctor/add live
   probe 15 s per server.
 - The shim AND `POST /mcp` expose exactly **5** meta-tools (`list_servers`,
   `list_tools`, `describe_tool`, `call`, `search_tools`).

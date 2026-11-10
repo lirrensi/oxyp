@@ -77,7 +77,7 @@ together; `exclude` wins over `servers`; globs (`*`/`?`, case-insensitive)
 match display + leaf + canonical. Unknown group → 404, outside scope → 403
 (`server not in scope`). `status`/`doctor`/`refresh` ignore scope (global /
 operator surfaces).
-Shared: 60 s HTTP client, bearer from `daemon.json` (or `OXYP_TOKEN` in
+Shared: HTTP client with no deadline by default (`--timeout` to impose one), bearer from `daemon.json` (or `OXYP_TOKEN` in
 remote mode), pretty JSON print, `exit 1` on Cobra errors and checked
 ≥400s. Autostart: read endpoint (reject empty URL / `PID ≤ 0` / dead
 PID), probe `/health` (2 s timeout), else spawn `oxyp daemon --dir <dir>`
@@ -294,5 +294,5 @@ Verification: `V-CLI-005`.
 |---|---|---|
 | Autostart wait | 5 s (50×100 ms) | fast attach |
 | Live probe (doctor/add) | 15 s per server | bounded triage |
-| Daemon RPC inside probe | 10 s req / 30 s init | consistent budgets |
-| CLI API timeout | 60 s | patient calls |
+| Daemon RPC inside probe | 10 s control / 600 s data-plane default / 30 s init | consistent budgets |
+| CLI API timeout | 0 (none; `--timeout` to impose one) | client owns its deadline |

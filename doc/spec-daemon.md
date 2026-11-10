@@ -234,7 +234,7 @@ remove the endpoint file.
 The endpoint file `<dir>/daemon.json` is `{url, pid, token, startedAt}`;
 fresh files are created 0600 (an existing file keeps its mode — tighten it
 manually). Stale files are rejected by a dead-PID check. HTTP server
-limits are read-header 10 s / read 30 s / write 60 s / idle 120 s.
+limits are read-header 10 s / read 0 / write 0 / idle 120 s.
 
 `GET /health` carries daemon identity as `{pid, startedAt, servers}` so
 CLI probes can tell "our daemon" from a stranger on the same port. Daemon
@@ -330,12 +330,13 @@ Verification: `V-CLI-001`, `V-DAEMON-001`.
 | Constraint | Value | Reason |
 |---|---|---|
 | Initialize budget | 30 s | bound slow servers |
-| Per-RPC budget | 10 s | bound slow tools |
+| Control-plane RPC budget | 10 s | bound discovery |
+| Data-plane budget | 600 s default; per-server/daemon `tool_timeout`; 0 = none | caller/upstream govern |
 | Health ping timeout / interval | 3 s / 10 s | liveness without load |
 | Idle sweep ticker / default timeout | 30 s / 10 min | reap without churn |
 | Remote metadata TTL | 5 min | bound staleness without push |
 | Endpoint write mode | 0600 (new files) | token secrecy |
-| HTTP server timeouts | 10/30/60/120 s | slowloris resistance |
+| HTTP server timeouts | header 10 s; read/write 0 | no OxyP cap on upstream work |
 | Graceful HTTP shutdown | 10 s | drain in-flight |
 | Per-client close cap | 5 s | one wedge child cannot wedge reload |
-| Autostart wait / `/health` probe / CLI API | 5 s / 2 s / 60 s | fast attach, patient calls |
+| Autostart wait / `/health` probe / CLI API | 5 s / 2 s / 0 (none; `--timeout` to cap) | fast attach, patient calls |

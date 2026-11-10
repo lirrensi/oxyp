@@ -63,6 +63,12 @@ type DaemonConfig struct {
 	// IdleTimeout is minutes before an idle stdio child is stopped.
 	// Default 10. 0 = never. Per-server idle_timeout overrides.
 	IdleTimeout *int `toml:"idle_timeout"`
+	// ToolTimeout is the default deadline for data-plane RPCs
+	// (tools/call, resources/read, prompts/get, completion/complete),
+	// in seconds. Nil = 600s. 0 = no OxyP-imposed deadline; the caller's
+	// context and the upstream server still govern. Per-server
+	// tool_timeout overrides this.
+	ToolTimeout *int `toml:"tool_timeout"`
 	// Name is this daemon's advertised federation name ("": anonymous).
 	// Peers display and address it by this; instance id stays the identity.
 	Name string `toml:"name"`
@@ -127,6 +133,10 @@ func (d DaemonConfig) DeepCopy() DaemonConfig {
 	if d.IdleTimeout != nil {
 		v := *d.IdleTimeout
 		out.IdleTimeout = &v
+	}
+	if d.ToolTimeout != nil {
+		v := *d.ToolTimeout
+		out.ToolTimeout = &v
 	}
 	if d.OutputGuard != nil {
 		v := *d.OutputGuard
@@ -199,8 +209,10 @@ type ServerEntry struct {
 	// memory/disk only (seeds once when empty); stores of live results are
 	// skipped while pinned. Drift is reported by doctor --live.
 	Pinned bool `toml:"pinned"`
-	// ToolTimeout overrides the per-RPC timeout for tool calls (seconds).
-	// Nil = daemon default (10s). 0 = default (not unlimited).
+	// ToolTimeout overrides the data-plane deadline for this server
+	// (seconds): tools/call, resources/read, prompts/get, completion/complete.
+	// Nil = daemon tool_timeout (default 600s). 0 = no OxyP-imposed deadline;
+	// the caller's context and the upstream server still govern.
 	ToolTimeout *int `toml:"tool_timeout"`
 	// TokenHeader remaps the bearer token header upstream
 	// (e.g. "X-API-Key"). Empty = Authorization.
@@ -784,6 +796,9 @@ func ValidateDaemon(d *DaemonConfig) string {
 	}
 	if d.IdleTimeout != nil && *d.IdleTimeout < 0 {
 		return "daemon.idle_timeout must be >= 0"
+	}
+	if d.ToolTimeout != nil && *d.ToolTimeout < 0 {
+		return "daemon.tool_timeout must be >= 0"
 	}
 	if strings.Contains(d.Name, ":") {
 		return "daemon.name must not contain ':'"

@@ -46,7 +46,21 @@ const (
 	DefaultHealthInterval  = 10 * time.Second
 	DefaultHealthTimeout   = 3 * time.Second
 	DefaultShutdownTimeout = 5 * time.Second
-	DefaultRequestTimeout  = 10 * time.Second
+	// DefaultRequestTimeout bounds OxyP's own control-plane RPCs
+	// (discovery/list/prompts/resources metadata, OAuth probes, remote
+	// probe hints). It must never bound data-plane work: tools/call,
+	// resources/read, prompts/get and completion/complete use
+	// DefaultToolTimeout instead.
+	DefaultRequestTimeout = 10 * time.Second
+	// DefaultToolTimeout is the data-plane default. OxyP is a messenger:
+	// the caller's ctx or the upstream server may impose a deadline, but
+	// OxyP only adds one because a totally unbounded RPC can wedge the
+	// daemon. 600s is deliberately generous; 0 (config) means no deadline.
+	DefaultToolTimeout = 600 * time.Second
+	// noTransportTimeout is the SSE transport's response cap when the
+	// request context already governs. mcp-go ignores a 0 response timeout,
+	// so use a ~100y sentinel; io deadlines (client/upstream) still win.
+	noTransportTimeout = 100 * 365 * 24 * time.Hour
 	// RemoteToolsTTL bounds how long remote discovery results are trusted.
 	// Streamable HTTP has no server-push channel in mcp-go v1.4.0
 	// (WithContinuousListening is deprecated + pins legacy protocol; the
@@ -116,8 +130,9 @@ type managed struct {
 	// consecutive failures and when the next heal probe may run.
 	failCount int
 	retryAt   time.Time
-	// inFlight counts active tool calls; the idle sweeper never stops
-	// a server with work running.
+	// inFlight counts active tool calls: the idle sweeper never stops a
+	// server with work running, and health pings skip it so a slow tool
+	// is not misreported as degraded.
 	inFlight int
 	// lastUsed is the last completed activity (spawn counts).
 	lastUsed time.Time
@@ -818,9 +833,10 @@ func (d *Daemon) spawn(ctx context.Context, m *managed, gen int) (client.MCPClie
 // http.Clients (redirect policy + per-server TLS) and optional OAuth.
 // Streaming uses a Timeout:0 client (idle SSE streams and event-stream
 // POST bodies are long-lived; http.Client.Timeout covers body reads, so a
-// 10s timeout would kill them). Per-RPC timeouts come from request
-// contexts (reqTO) and WithResponseTimeout instead — mcp-go builds every
-// request with http.NewRequestWithContext, so cancellations still fire.
+// short timeout would kill them). Per-RPC deadlines come from request
+// contexts: 10s control-plane, configured data-plane (default 600s, 0 =
+// none). The SSE transport gets a near-infinite cap so it never undercuts
+// a configured data-plane timeout — contexts still cancel on client exit.
 func (d *Daemon) dialRemote(m *managed) (*client.Client, error) {
 	cfg := m.getCfg()
 	_, streamClient, ocfg, hasOAuth, err := d.remoteStack(m)
@@ -831,7 +847,7 @@ func (d *Daemon) dialRemote(m *managed) (*client.Client, error) {
 	if cfg.Transport == "sse" {
 		opts := []transport.ClientOption{
 			transport.WithHeaders(headers),
-			transport.WithResponseTimeout(d.reqTO),
+			transport.WithResponseTimeout(noTransportTimeout),
 			transport.WithHTTPClient(streamClient),
 			transport.WithHeaderFunc(passthroughFunc(cfg)),
 		}
@@ -954,7 +970,7 @@ func (d *Daemon) dialRemoteSSE(m *managed) (*client.Client, error) {
 	}
 	opts := []transport.ClientOption{
 		transport.WithHeaders(remappedHeaders(cfg)),
-		transport.WithResponseTimeout(d.reqTO),
+		transport.WithResponseTimeout(noTransportTimeout),
 		transport.WithHTTPClient(streamClient),
 	}
 	if hasOAuth {
@@ -1350,7 +1366,7 @@ func (d *Daemon) listToolsOnce(ctx context.Context, m *managed) ([]mcp.Tool, err
 	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
+	reqCtx, cancel := context.WithTimeout(ctx, d.reqTO)
 	defer cancel()
 	cfg := m.getCfg()
 	start := time.Now()
@@ -1566,7 +1582,7 @@ func (d *Daemon) listResourcesOnce(ctx context.Context, m *managed) ([]mcp.Resou
 	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
+	reqCtx, cancel := context.WithTimeout(ctx, d.reqTO)
 	defer cancel()
 	res, err := c.ListResources(reqCtx, mcp.ListResourcesRequest{})
 	if err != nil {
@@ -1620,7 +1636,7 @@ func (d *Daemon) readResourceOnce(ctx context.Context, m *managed, uri string) (
 	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
+	reqCtx, cancel := d.dataTimeoutCtx(ctx, m.getCfg())
 	defer cancel()
 	return c.ReadResource(reqCtx, mcp.ReadResourceRequest{
 		Params: mcp.ReadResourceParams{URI: uri},
@@ -1675,7 +1691,7 @@ func (d *Daemon) listPromptsOnce(ctx context.Context, m *managed) ([]mcp.Prompt,
 	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
+	reqCtx, cancel := context.WithTimeout(ctx, d.reqTO)
 	defer cancel()
 	res, err := c.ListPrompts(reqCtx, mcp.ListPromptsRequest{})
 	if err != nil {
@@ -1732,7 +1748,7 @@ func (d *Daemon) listTemplatesOnce(ctx context.Context, m *managed) ([]mcp.Resou
 	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
+	reqCtx, cancel := context.WithTimeout(ctx, d.reqTO)
 	defer cancel()
 	res, err := c.ListResourceTemplates(reqCtx, mcp.ListResourceTemplatesRequest{})
 	if err != nil {
@@ -1779,7 +1795,7 @@ func (d *Daemon) getPromptOnce(ctx context.Context, m *managed, prompt string, a
 	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
+	reqCtx, cancel := d.dataTimeoutCtx(ctx, m.getCfg())
 	defer cancel()
 	return c.GetPrompt(reqCtx, mcp.GetPromptRequest{
 		Params: mcp.GetPromptParams{Name: prompt, Arguments: args},
@@ -1824,7 +1840,7 @@ func (d *Daemon) completeOnce(ctx context.Context, m *managed, params mcp.Comple
 	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
+	reqCtx, cancel := d.dataTimeoutCtx(ctx, m.getCfg())
 	defer cancel()
 	return c.Complete(reqCtx, mcp.CompleteRequest{Params: params})
 }
@@ -2049,12 +2065,35 @@ func checkParams(cfg config.ServerEntry, tool string, args map[string]any) error
 	return &ParamDeniedError{Server: cfg.Name, Tool: tool, Params: bad, Allowed: allow}
 }
 
-// effectiveTimeout resolves per-server tool_timeout (seconds) over default.
-func effectiveTimeout(cfg config.ServerEntry, dflt time.Duration) time.Duration {
-	if cfg.ToolTimeout != nil && *cfg.ToolTimeout > 0 {
-		return time.Duration(*cfg.ToolTimeout) * time.Second
+// resolveDataTimeout resolves the deadline for data-plane RPCs
+// (tools/call, resources/read, prompts/get, completion/complete):
+// per-server tool_timeout > [daemon] tool_timeout > DefaultToolTimeout.
+// A configured 0 means "no OxyP-imposed deadline" (ok=false): the caller's
+// context and the upstream server still govern, OxyP adds nothing.
+func resolveDataTimeout(cfg config.ServerEntry, dc config.DaemonConfig) (time.Duration, bool) {
+	if cfg.ToolTimeout != nil {
+		return secondsOrNone(*cfg.ToolTimeout)
 	}
-	return dflt
+	if dc.ToolTimeout != nil {
+		return secondsOrNone(*dc.ToolTimeout)
+	}
+	return DefaultToolTimeout, true
+}
+
+func secondsOrNone(secs int) (time.Duration, bool) {
+	if secs <= 0 {
+		return 0, false
+	}
+	return time.Duration(secs) * time.Second, true
+}
+
+// dataTimeoutCtx wraps ctx for one data-plane RPC. No deadline is still a
+// cancelable context, so client disconnects propagate upstream normally.
+func (d *Daemon) dataTimeoutCtx(ctx context.Context, cfg config.ServerEntry) (context.Context, context.CancelFunc) {
+	if to, ok := resolveDataTimeout(cfg, d.DaemonConfig()); ok {
+		return context.WithTimeout(ctx, to)
+	}
+	return context.WithCancel(ctx)
 }
 
 func (d *Daemon) callToolOnce(ctx context.Context, m *managed, tool string, args map[string]any, meta map[string]any) (*mcp.CallToolResult, error) {
@@ -2063,7 +2102,7 @@ func (d *Daemon) callToolOnce(ctx context.Context, m *managed, tool string, args
 	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, effectiveTimeout(m.getCfg(), d.reqTO))
+	reqCtx, cancel := d.dataTimeoutCtx(ctx, m.getCfg())
 	defer cancel()
 	params := mcp.CallToolParams{Name: tool, Arguments: args}
 	if meta != nil {
@@ -2120,8 +2159,13 @@ func (d *Daemon) pingConnected(ctx context.Context) {
 	for n, m := range d.servers {
 		m.mu.Lock()
 		connected := m.client != nil
+		// Never ping a server with a data-plane call in flight: a busy
+		// upstream processes serially, the 3s ping times out behind the
+		// real work, and status falsely reports degraded. The call's own
+		// deadline (or the client) governs; ping when it is free again.
+		busy := m.inFlight > 0
 		m.mu.Unlock()
-		if !connected {
+		if !connected || busy {
 			continue
 		}
 		if peer := m.cfg.Peer; peer != "" {

@@ -143,9 +143,10 @@ Verification: `V-GUARD-003`.
 ### Requirement: Remote transport (redirects, TLS, sessions)
 
 The daemon MUST fetch remotes through `remhttp.NewClient`: proxy from env,
-HTTP/2, idle 16/90 s, handshake 10 s; a 10 s client for RPC/OAuth and a
-`Timeout: 0` client for long-lived SSE/stream bodies; per-RPC 10 s bounds
-via contexts. Redirects: up to **4** followed (5 requests; the 5th errors
+HTTP/2, idle 16/90 s, handshake 10 s; a 10 s client for OAuth/probes and a
+`Timeout: 0` client for long-lived SSE/stream bodies; control-plane RPCs
+are bounded at 10 s via contexts, data-plane RPCs use the configured
+deadline (default 600 s, 0 = none). Redirects: up to **4** followed (5 requests; the 5th errors
 `too many redirects (5)`). Same-origin = same scheme AND host (port
 counts). 301/302/303 POST is rebuilt as POST same-origin (body replayed
 when `GetBody` exists); cross-origin POST becomes GET with no replay.
@@ -249,8 +250,8 @@ nonblank), `tls` (cert+key both/neither, files statable), `auth`
 (`""`/`oauth`, remote-only), `oauth` (`flow` browser/device/token,
 `grant_type` `""`/client_credentials + id/secret, `callback_port ≥ 0`,
 `timeout ≥ 0`, `authorization_url`/`token_url`/`registration_url` discovery
-overrides), `lifecycle` enum, `idle_timeout`, `tool_timeout` (per-RPC
-seconds, ≥ 0, 0 = default), `token_header` (remaps static `Authorization`,
+overrides), `lifecycle` enum, `idle_timeout`, `tool_timeout` (data-plane
+seconds, ≥ 0, 0 = no OxyP deadline; default 600), `token_header` (remaps static `Authorization`,
 no CR/LF/colon), `passthrough_headers` (remote-only allowlist),
 `new_tools` (`""`/expose/hide), `pinned` bool, `output_guard`, `trace`.
 Unknown lifecycle/idle/guard/trace values and local
@@ -322,5 +323,6 @@ Verification: `V-GUARD-007` (incl. mutation: exclusivity removal caught).
 | Spill retention | newest 100 / 100 MiB / 24 h (on-spill prune) | bounded `/tmp` |
 | Trace caps | 262144 B / 10000 events | bounded log |
 | Redact truncation | 8 KiB + suffix | bounded errors |
-| RPC / init | 10 s / 30 s | bounded dial |
+| Control RPC / init | 10 s / 30 s | bounded dial |
+| Data-plane default | 600 s (0 = none) | caller/upstream govern |
 | Redirects | 4 followed | loop bound |

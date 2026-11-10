@@ -48,7 +48,7 @@ use `POST /mcp?servers=&exclude=` or `servers`/`exclude` tool args instead.
 
 | Transport | Who speaks it | oxyp today |
 |---|---|---|
-| stdio JSON-RPC/JSONL | all local servers | ✅ supported (cold spawn, 30 s init / 10 s RPC) |
+| stdio JSON-RPC/JSONL | all local servers | ✅ supported (cold spawn, 30 s init / 10 s control RPC / 600 s data-plane default) |
 | Streamable HTTP (`POST`, `Mcp-Session-Id`, session re-init) | hermes/omp/opencode remote, ChatGPT | ✅ supported (auto; 5-min metadata TTL, no live push) |
 | Legacy SSE (`GET /sse` + `POST /messages/`) | old servers, omp `type:sse`, hermes `transport:sse` | ✅ supported (`transport = "sse"` or auto-fallback on legacy error) |
 | OAuth 2.0/2.1 + PKCE, DCR | linear, GitHub, glean… | ✅ supported daemon-held (browser/device/token/client_credentials) — see [spec-oauth](spec-oauth.md) |
@@ -75,9 +75,10 @@ use `POST /mcp?servers=&exclude=` or `servers`/`exclude` tool args instead.
    pipes. oxyp connectors: executable files, argv from TOML — same rule.
 5. **Timeouts disagree everywhere.** opencode: 30 s impl vs 5 s docs, `0`
    illegal. OMP: 30 s, global env override, `0` disables. hermes: 300 s tool /
-   60 s connect. lazy-mcp: 10 s downstream. oxyp: 30 s init / 10 s request /
-   3 s ping. Zoo must include slow-init (>30 s), slow-tool (>10 s), and
-   never-responding servers to prove our timeouts fire and report cleanly.
+   60 s connect. lazy-mcp: 10 s downstream. oxyp: 30 s init / 10 s control /
+   600 s data-plane default (0 = no OxyP deadline) / 3 s ping. Zoo must include
+   slow-init (>30 s), slow-tool (>10 s), and never-responding servers to prove
+   our timeouts fire and report cleanly.
 6. **Tool-name mangling collides.** opencode `<server>_<tool>` (lossy
    sanitize, last-wins); OMP `mcp__<server>_<tool>` (lowercase, 64-char cap,
    deterministic winner); hermes `mcp__<server>__<tool>` (double underscore,

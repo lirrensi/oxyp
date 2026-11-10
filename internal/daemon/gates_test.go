@@ -34,19 +34,29 @@ func TestCheckParamsGate(t *testing.T) {
 	}
 }
 
-// effectiveTimeout: per-server override wins, 0/nil fall back to default.
-func TestEffectiveTimeoutGate(t *testing.T) {
-	d := 45
-	cfg := config.ServerEntry{Name: "s", ToolTimeout: &d}
-	if got := effectiveTimeout(cfg, DefaultRequestTimeout); got != 45*1000000000 {
-		t.Fatalf("want 45s, got %v", got)
+// resolveDataTimeout: per-server > daemon > 600s default; 0 = no deadline.
+func TestResolveDataTimeoutGate(t *testing.T) {
+	zero, fortyFive, oneTwenty := 0, 45, 120
+	cases := []struct {
+		name string
+		srv  *int
+		dmn  *int
+		want time.Duration
+		ok   bool
+	}{
+		{"default", nil, nil, DefaultToolTimeout, true},
+		{"server wins", &fortyFive, &oneTwenty, 45 * time.Second, true},
+		{"daemon fallback", nil, &oneTwenty, 120 * time.Second, true},
+		{"server zero disables", &zero, &oneTwenty, 0, false},
+		{"daemon zero disables", nil, &zero, 0, false},
 	}
-	zero := 0
-	if got := effectiveTimeout(config.ServerEntry{ToolTimeout: &zero}, DefaultRequestTimeout); got != DefaultRequestTimeout {
-		t.Fatalf("0 must fall back to default, got %v", got)
-	}
-	if got := effectiveTimeout(config.ServerEntry{}, DefaultRequestTimeout); got != DefaultRequestTimeout {
-		t.Fatalf("nil must fall back to default, got %v", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := resolveDataTimeout(config.ServerEntry{ToolTimeout: tc.srv}, config.DaemonConfig{ToolTimeout: tc.dmn})
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("got (%v,%v), want (%v,%v)", got, ok, tc.want, tc.ok)
+			}
+		})
 	}
 }
 

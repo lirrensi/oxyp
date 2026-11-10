@@ -16,11 +16,11 @@ Zoo servers: `zoo/stdio/zoo_stdio.py` (flag matrix), `zoo_needy.py`
 | blank-stdout | ✅ | skipped |
 | stderr-flood (5000×200B) | ✅ | drained, no deadlock |
 | slow-init 2s | ✅ | within 30s init timeout |
-| slow-tool 2s | ✅ | within 10s request timeout |
-| slow-tool 15s | ✅ | **fails clean at 10.0s** with deadline exceeded |
-| hang-forever | ✅ | **killed clean at 10.0s** |
+| slow-tool 2s | ✅ | within 600s data-plane default |
+| slow-tool 15s | ✅ | within 600s data-plane default |
+| hang-forever | ✅ | **killed clean at 600s** (configurable; 0 = none) |
 | crash-on-3rd-call | ✅ | `transport closed`, server unhealthy, daemon alive |
-| bad-json-on-call | ✅ | hangs till 10s timeout (read loop skips junk, waits) |
+| bad-json-on-call | ✅ | waits for the configured data-plane deadline (600s default) |
 | wrong-proto-version | ✅ | `unsupported protocol version`, clean refuse |
 | paginated 150 tools | ✅ | all 150 listed (mcp-go auto-paginates + cursor-loop guard) |
 | unicode names | ✅ | pass through untouched |
